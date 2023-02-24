@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"internal/cfg"
+	"internal/platform"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +25,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 // Builder reports the name of the builder running this test
@@ -215,16 +215,6 @@ func GoTool() (string, error) {
 	return goBin, nil
 }
 
-// HasExec reports whether the current system can start new processes
-// using os.StartProcess or (more commonly) exec.Command.
-func HasExec() bool {
-	switch runtime.GOOS {
-	case "js", "ios":
-		return false
-	}
-	return true
-}
-
 // HasSrc reports whether the entire source tree is available under GOROOT.
 func HasSrc() bool {
 	switch runtime.GOOS {
@@ -232,33 +222,6 @@ func HasSrc() bool {
 		return false
 	}
 	return true
-}
-
-// MustHaveExec checks that the current system can start new processes
-// using os.StartProcess or (more commonly) exec.Command.
-// If not, MustHaveExec calls t.Skip with an explanation.
-func MustHaveExec(t testing.TB) {
-	if !HasExec() {
-		t.Skipf("skipping test: cannot exec subprocess on %s/%s", runtime.GOOS, runtime.GOARCH)
-	}
-}
-
-var execPaths sync.Map // path -> error
-
-// MustHaveExecPath checks that the current system can start the named executable
-// using os.StartProcess or (more commonly) exec.Command.
-// If not, MustHaveExecPath calls t.Skip with an explanation.
-func MustHaveExecPath(t testing.TB, path string) {
-	MustHaveExec(t)
-
-	err, found := execPaths.Load(path)
-	if !found {
-		_, err = exec.LookPath(path)
-		err, _ = execPaths.LoadOrStore(path, err)
-	}
-	if err != nil {
-		t.Skipf("skipping test: %s: %s", path, err)
-	}
 }
 
 // HasExternalNetwork reports whether the current system can use
@@ -295,19 +258,8 @@ func MustHaveCGO(t testing.TB) {
 
 // CanInternalLink reports whether the current system can link programs with
 // internal linking.
-// (This is the opposite of cmd/internal/sys.MustLinkExternal. Keep them in sync.)
 func CanInternalLink() bool {
-	switch runtime.GOOS {
-	case "android":
-		if runtime.GOARCH != "arm64" {
-			return false
-		}
-	case "ios":
-		if runtime.GOARCH == "arm64" {
-			return false
-		}
-	}
-	return true
+	return !platform.MustLinkExternal(runtime.GOOS, runtime.GOARCH)
 }
 
 // MustInternalLink checks that the current system can link programs with internal
@@ -366,28 +318,6 @@ func SkipFlakyNet(t testing.TB) {
 	}
 }
 
-// CleanCmdEnv will fill cmd.Env with the environment, excluding certain
-// variables that could modify the behavior of the Go tools such as
-// GODEBUG and GOTRACEBACK.
-func CleanCmdEnv(cmd *exec.Cmd) *exec.Cmd {
-	if cmd.Env != nil {
-		panic("environment already set")
-	}
-	for _, env := range os.Environ() {
-		// Exclude GODEBUG from the environment to prevent its output
-		// from breaking tests that are trying to parse other command output.
-		if strings.HasPrefix(env, "GODEBUG=") {
-			continue
-		}
-		// Exclude GOTRACEBACK for the same reason.
-		if strings.HasPrefix(env, "GOTRACEBACK=") {
-			continue
-		}
-		cmd.Env = append(cmd.Env, env)
-	}
-	return cmd
-}
-
 // CPUIsSlow reports whether the CPU running the test is suspected to be slow.
 func CPUIsSlow() bool {
 	switch runtime.GOARCH {
@@ -416,58 +346,46 @@ func SkipIfOptimizationOff(t testing.TB) {
 	}
 }
 
-// RunWithTimeout runs cmd and returns its combined output. If the
-// subprocess exits with a non-zero status, it will log that status
-// and return a non-nil error, but this is not considered fatal.
-func RunWithTimeout(t testing.TB, cmd *exec.Cmd) ([]byte, error) {
-	args := cmd.Args
-	if args == nil {
-		args = []string{cmd.Path}
+// WriteImportcfg writes an importcfg file used by the compiler or linker to
+// dstPath containing entries for the file mappings in packageFiles, as well
+// as for the packages transitively imported by the package(s) in pkgs.
+//
+// pkgs may include any package pattern that is valid to pass to 'go list',
+// so it may also be a list of Go source files all in the same directory.
+func WriteImportcfg(t testing.TB, dstPath string, packageFiles map[string]string, pkgs ...string) {
+	t.Helper()
+
+	icfg := new(bytes.Buffer)
+	icfg.WriteString("# import config\n")
+	for k, v := range packageFiles {
+		fmt.Fprintf(icfg, "packagefile %s=%s\n", k, v)
 	}
 
-	var b bytes.Buffer
-	cmd.Stdout = &b
-	cmd.Stderr = &b
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("starting %s: %v", args, err)
-	}
-
-	// If the process doesn't complete within 1 minute,
-	// assume it is hanging and kill it to get a stack trace.
-	p := cmd.Process
-	done := make(chan bool)
-	go func() {
-		scale := 1
-		// This GOARCH/GOOS test is copied from cmd/dist/test.go.
-		// TODO(iant): Have cmd/dist update the environment variable.
-		if runtime.GOARCH == "arm" || runtime.GOOS == "windows" {
-			scale = 2
+	if len(pkgs) > 0 {
+		// Use 'go list' to resolve any missing packages and rewrite the import map.
+		cmd := Command(t, GoToolPath(t), "list", "-export", "-deps", "-f", `{{if ne .ImportPath "command-line-arguments"}}{{if .Export}}{{.ImportPath}}={{.Export}}{{end}}{{end}}`)
+		cmd.Args = append(cmd.Args, pkgs...)
+		cmd.Stderr = new(strings.Builder)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%v: %v\n%s", cmd, err, cmd.Stderr)
 		}
-		if s := os.Getenv("GO_TEST_TIMEOUT_SCALE"); s != "" {
-			if sc, err := strconv.Atoi(s); err == nil {
-				scale = sc
+
+		for _, line := range strings.Split(string(out), "\n") {
+			if line == "" {
+				continue
+			}
+			importPath, export, ok := strings.Cut(line, "=")
+			if !ok {
+				t.Fatalf("invalid line in output from %v:\n%s", cmd, line)
+			}
+			if packageFiles[importPath] == "" {
+				fmt.Fprintf(icfg, "packagefile %s=%s\n", importPath, export)
 			}
 		}
-
-		select {
-		case <-done:
-		case <-time.After(time.Duration(scale) * time.Minute):
-			p.Signal(Sigquit)
-			// If SIGQUIT doesn't do it after a little
-			// while, kill the process.
-			select {
-			case <-done:
-			case <-time.After(time.Duration(scale) * 30 * time.Second):
-				p.Signal(os.Kill)
-			}
-		}
-	}()
-
-	err := cmd.Wait()
-	if err != nil {
-		t.Logf("%s exit status: %v", args, err)
 	}
-	close(done)
 
-	return b.Bytes(), err
+	if err := os.WriteFile(dstPath, icfg.Bytes(), 0666); err != nil {
+		t.Fatal(err)
+	}
 }

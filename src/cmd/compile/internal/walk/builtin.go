@@ -130,6 +130,18 @@ func walkAppend(n *ir.CallExpr, init *ir.Nodes, dst ir.Node) ir.Node {
 	return s
 }
 
+// walkClear walks an OCLEAR node.
+func walkClear(n *ir.UnaryExpr) ir.Node {
+	typ := n.X.Type()
+	switch {
+	case typ.IsSlice():
+		return arrayClear(n.X.Pos(), n.X, nil)
+	case typ.IsMap():
+		return mapClear(n.X, reflectdata.TypePtrAt(n.X.Pos(), n.X.Type()))
+	}
+	panic("unreachable")
+}
+
 // walkClose walks an OCLOSE node.
 func walkClose(n *ir.UnaryExpr, init *ir.Nodes) ir.Node {
 	// cannot use chanfn - closechan takes any, not chan any
@@ -513,7 +525,7 @@ func walkNew(n *ir.UnaryExpr, init *ir.Nodes) ir.Node {
 	return n
 }
 
-// generate code for print
+// generate code for print.
 func walkPrint(nn *ir.CallExpr, init *ir.Nodes) ir.Node {
 	// Hoist all the argument evaluation up before the lock.
 	walkExprListCheap(nn.Args, init)
@@ -652,7 +664,7 @@ func walkPrint(nn *ir.CallExpr, init *ir.Nodes) ir.Node {
 	return walkStmt(typecheck.Stmt(r))
 }
 
-// walkRecover walks an ORECOVERFP node.
+// walkRecoverFP walks an ORECOVERFP node.
 func walkRecoverFP(nn *ir.CallExpr, init *ir.Nodes) ir.Node {
 	return mkcall("gorecover", nn.Type(), init, walkExpr(nn.Args[0], init))
 }

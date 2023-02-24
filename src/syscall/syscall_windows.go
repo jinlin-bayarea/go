@@ -371,8 +371,11 @@ func Open(path string, mode int, perm uint32) (fd Handle, err error) {
 			}
 		}
 	}
-	h, e := CreateFile(pathp, access, sharemode, sa, createmode, attrs, 0)
-	return h, e
+	if createmode == OPEN_EXISTING && access == GENERIC_READ {
+		// Necessary for opening directory handles.
+		attrs |= FILE_FLAG_BACKUP_SEMANTICS
+	}
+	return CreateFile(pathp, access, sharemode, sa, createmode, attrs, 0)
 }
 
 func Read(fd Handle, p []byte) (n int, err error) {
@@ -916,9 +919,13 @@ func Shutdown(fd Handle, how int) (err error) {
 }
 
 func WSASendto(s Handle, bufs *WSABuf, bufcnt uint32, sent *uint32, flags uint32, to Sockaddr, overlapped *Overlapped, croutine *byte) (err error) {
-	rsa, len, err := to.sockaddr()
-	if err != nil {
-		return err
+	var rsa unsafe.Pointer
+	var len int32
+	if to != nil {
+		rsa, len, err = to.sockaddr()
+		if err != nil {
+			return err
+		}
 	}
 	r1, _, e1 := Syscall9(procWSASendTo.Addr(), 9, uintptr(s), uintptr(unsafe.Pointer(bufs)), uintptr(bufcnt), uintptr(unsafe.Pointer(sent)), uintptr(flags), uintptr(unsafe.Pointer(rsa)), uintptr(len), uintptr(unsafe.Pointer(overlapped)), uintptr(unsafe.Pointer(croutine)))
 	if r1 == socket_error {

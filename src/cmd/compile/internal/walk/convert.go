@@ -45,7 +45,7 @@ func walkConvInterface(n *ir.ConvExpr, init *ir.Nodes) ir.Node {
 	toType := n.Type()
 	if !fromType.IsInterface() && !ir.IsBlank(ir.CurFunc.Nname) {
 		// skip unnamed functions (func _())
-		if base.Debug.Unified != 0 && fromType.HasShape() {
+		if fromType.HasShape() {
 			// Unified IR uses OCONVIFACE for converting all derived types
 			// to interface type. Avoid assertion failure in
 			// MarkTypeUsedInInterface, because we've marked used types
@@ -80,13 +80,15 @@ func walkConvInterface(n *ir.ConvExpr, init *ir.Nodes) ir.Node {
 
 	var typeWord ir.Node
 	if toType.IsEmptyInterface() {
-		// Implement interface to empty interface conversion.
-		// res = itab
+		// Implement interface to empty interface conversion:
+		//
+		// var res *uint8
+		// res = (*uint8)(unsafe.Pointer(itab))
 		// if res != nil {
 		//    res = res.type
 		// }
 		typeWord = typecheck.Temp(types.NewPtr(types.Types[types.TUINT8]))
-		init.Append(ir.NewAssignStmt(base.Pos, typeWord, itab))
+		init.Append(ir.NewAssignStmt(base.Pos, typeWord, typecheck.Conv(typecheck.Conv(itab, types.Types[types.TUNSAFEPTR]), typeWord.Type())))
 		nif := ir.NewIfStmt(base.Pos, typecheck.Expr(ir.NewBinaryExpr(base.Pos, ir.ONE, typeWord, typecheck.NodNil())), nil, nil)
 		nif.Body = []ir.Node{ir.NewAssignStmt(base.Pos, typeWord, itabType(typeWord))}
 		init.Append(nif)

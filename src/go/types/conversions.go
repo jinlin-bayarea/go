@@ -8,11 +8,11 @@ package types
 
 import (
 	"go/constant"
-	"go/token"
+	. "internal/types/errors"
 	"unicode"
 )
 
-// Conversion type-checks the conversion T(x).
+// conversion type-checks the conversion T(x).
 // The result is in x.
 func (check *Checker) conversion(x *operand, T Type) {
 	constArg := x.mode == constant_
@@ -58,7 +58,7 @@ func (check *Checker) conversion(x *operand, T Type) {
 				return true
 			}
 			if !constConvertibleTo(u, nil) {
-				cause = check.sprintf("cannot convert %s to %s (in %s)", x, u, T)
+				cause = check.sprintf("cannot convert %s to type %s (in %s)", x, u, T)
 				return false
 			}
 			return true
@@ -71,23 +71,11 @@ func (check *Checker) conversion(x *operand, T Type) {
 	}
 
 	if !ok {
-		var err error_
-		err.code = _InvalidConversion
-		if compilerErrorMessages {
-			if cause != "" {
-				// Add colon at end of line if we have a following cause.
-				err.errorf(x.Pos(), "cannot convert %s to type %s:", x, T)
-				err.errorf(token.NoPos, cause)
-			} else {
-				err.errorf(x.Pos(), "cannot convert %s to type %s", x, T)
-			}
+		if cause != "" {
+			check.errorf(x, InvalidConversion, "cannot convert %s to type %s: %s", x, T, cause)
 		} else {
-			err.errorf(x.Pos(), "cannot convert %s to %s", x, T)
-			if cause != "" {
-				err.errorf(token.NoPos, cause)
-			}
+			check.errorf(x, InvalidConversion, "cannot convert %s to type %s", x, T)
 		}
-		check.report(&err)
 		x.mode = invalid
 		return
 	}
@@ -123,7 +111,7 @@ func (check *Checker) conversion(x *operand, T Type) {
 // the spec) is that we cannot shift a floating-point value: 1 in 1<<s should
 // be converted to UntypedFloat because of the addition of 1.0. Fixing this
 // is tricky because we'd have to run updateExprType on the argument first.
-// (Issue #21982.)
+// (go.dev/issue/21982.)
 
 // convertibleTo reports whether T(x) is valid. In the failure case, *cause
 // may be set to the cause for the failure.
@@ -249,7 +237,7 @@ func (x *operand) convertibleTo(check *Checker, T Type, cause *string) bool {
 					return false // no specific types
 				}
 				if !x.convertibleTo(check, T.typ, cause) {
-					errorf("cannot convert %s (in %s) to %s (in %s)", V.typ, Vp, T.typ, Tp)
+					errorf("cannot convert %s (in %s) to type %s (in %s)", V.typ, Vp, T.typ, Tp)
 					return false
 				}
 				return true
@@ -263,7 +251,7 @@ func (x *operand) convertibleTo(check *Checker, T Type, cause *string) bool {
 			}
 			x.typ = V.typ
 			if !x.convertibleTo(check, T, cause) {
-				errorf("cannot convert %s (in %s) to %s", V.typ, Vp, T)
+				errorf("cannot convert %s (in %s) to type %s", V.typ, Vp, T)
 				return false
 			}
 			return true
@@ -274,7 +262,7 @@ func (x *operand) convertibleTo(check *Checker, T Type, cause *string) bool {
 				return false // no specific types
 			}
 			if !x.convertibleTo(check, T.typ, cause) {
-				errorf("cannot convert %s to %s (in %s)", x.typ, T.typ, Tp)
+				errorf("cannot convert %s to type %s (in %s)", x.typ, T.typ, Tp)
 				return false
 			}
 			return true

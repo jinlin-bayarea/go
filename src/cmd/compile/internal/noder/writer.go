@@ -11,6 +11,7 @@ import (
 	"cmd/compile/internal/base"
 	"cmd/compile/internal/ir"
 	"cmd/compile/internal/syntax"
+	"cmd/compile/internal/types"
 	"cmd/compile/internal/types2"
 )
 
@@ -120,12 +121,21 @@ func (pw *pkgWriter) unexpected(what string, p poser) {
 	pw.fatalf(p, "unexpected %s: %v (%T)", what, p, p)
 }
 
+func (pw *pkgWriter) typeAndValue(x syntax.Expr) syntax.TypeAndValue {
+	tv := x.GetTypeInfo()
+	if tv.Type == nil {
+		pw.fatalf(x, "missing Types entry: %v", syntax.String(x))
+	}
+	return tv
+}
+func (pw *pkgWriter) maybeTypeAndValue(x syntax.Expr) (syntax.TypeAndValue, bool) {
+	tv := x.GetTypeInfo()
+	return tv, tv.Type != nil
+}
+
 // typeOf returns the Type of the given value expression.
 func (pw *pkgWriter) typeOf(expr syntax.Expr) types2.Type {
-	tv, ok := pw.info.Types[expr]
-	if !ok {
-		pw.fatalf(expr, "missing Types entry: %v", syntax.String(expr))
-	}
+	tv := pw.typeAndValue(expr)
 	if !tv.IsValue() {
 		pw.fatalf(expr, "expected value: %v", syntax.String(expr))
 	}
@@ -432,8 +442,9 @@ func (pw *pkgWriter) pkgIdx(pkg *types2.Package) pkgbits.Index {
 // @@@ Types
 
 var (
-	anyTypeName  = types2.Universe.Lookup("any").(*types2.TypeName)
-	runeTypeName = types2.Universe.Lookup("rune").(*types2.TypeName)
+	anyTypeName        = types2.Universe.Lookup("any").(*types2.TypeName)
+	comparableTypeName = types2.Universe.Lookup("comparable").(*types2.TypeName)
+	runeTypeName       = types2.Universe.Lookup("rune").(*types2.TypeName)
 )
 
 // typ writes a use of the given type into the bitstream.
@@ -485,7 +496,7 @@ func (pw *pkgWriter) typIdx(typ types2.Type, dict *writerDict) typeInfo {
 			w.Len(int(kind))
 
 		default:
-			// Handle "byte" and "rune" as references to their TypeName.
+			// Handle "byte" and "rune" as references to their TypeNames.
 			obj := types2.Universe.Lookup(typ.Name())
 			assert(obj.Type() == typ)
 
@@ -543,6 +554,7 @@ func (pw *pkgWriter) typIdx(typ types2.Type, dict *writerDict) typeInfo {
 		w.structType(typ)
 
 	case *types2.Interface:
+		// Handle "any" as reference to its TypeName.
 		if typ == anyTypeName.Type() {
 			w.Code(pkgbits.TypeNamed)
 			w.obj(anyTypeName, nil)
@@ -590,6 +602,23 @@ func (w *writer) unionType(typ *types2.Union) {
 }
 
 func (w *writer) interfaceType(typ *types2.Interface) {
+	// If typ has no embedded types but it's not a basic interface, then
+	// the natural description we write out below will fail to
+	// reconstruct it.
+	if typ.NumEmbeddeds() == 0 && !typ.IsMethodSet() {
+		// Currently, this can only happen for the underlying Interface of
+		// "comparable", which is needed to handle type declarations like
+		// "type C comparable".
+		assert(typ == comparableTypeName.Type().(*types2.Named).Underlying())
+
+		// Export as "interface{ comparable }".
+		w.Len(0)                         // NumExplicitMethods
+		w.Len(1)                         // NumEmbeddeds
+		w.Bool(false)                    // IsImplicit
+		w.typ(comparableTypeName.Type()) // EmbeddedType(0)
+		return
+	}
+
 	w.Len(typ.NumExplicitMethods())
 	w.Len(typ.NumEmbeddeds())
 
@@ -775,9 +804,6 @@ func (w *writer) doObj(wext *writer, obj types2.Object) pkgbits.CodeObj {
 		return pkgbits.ObjFunc
 
 	case *types2.TypeName:
-		decl, ok := w.p.typDecls[obj]
-		assert(ok)
-
 		if obj.IsAlias() {
 			w.pos(obj)
 			w.typ(obj.Type())
@@ -790,7 +816,7 @@ func (w *writer) doObj(wext *writer, obj types2.Object) pkgbits.CodeObj {
 		w.pos(obj)
 		w.typeParamNames(named.TypeParams())
 		wext.typeExt(obj)
-		w.typExpr(decl.Type)
+		w.typ(named.Underlying())
 
 		w.Len(named.NumMethods())
 		for i := 0; i < named.NumMethods(); i++ {
@@ -805,16 +831,6 @@ func (w *writer) doObj(wext *writer, obj types2.Object) pkgbits.CodeObj {
 		wext.varExt(obj)
 		return pkgbits.ObjVar
 	}
-}
-
-// typExpr writes the type represented by the given expression.
-//
-// TODO(mdempsky): Document how this differs from exprType.
-func (w *writer) typExpr(expr syntax.Expr) {
-	tv, ok := w.p.info.Types[expr]
-	assert(ok)
-	assert(tv.IsType())
-	w.typ(tv.Type)
 }
 
 // objDict writes the dictionary needed for reading the given object.
@@ -1533,7 +1549,7 @@ func (w *writer) switchStmt(stmt *syntax.SwitchStmt) {
 		if iface != nil {
 			w.Len(len(cases))
 			for _, cas := range cases {
-				if w.Bool(isNil(w.p.info, cas)) {
+				if w.Bool(isNil(w.p, cas)) {
 					continue
 				}
 				w.exprType(iface, cas)
@@ -1598,10 +1614,10 @@ func (w *writer) expr(expr syntax.Expr) {
 
 	expr = unparen(expr) // skip parens; unneeded after typecheck
 
-	obj, inst := lookupObj(w.p.info, expr)
+	obj, inst := lookupObj(w.p, expr)
 	targs := inst.TypeArgs
 
-	if tv, ok := w.p.info.Types[expr]; ok {
+	if tv, ok := w.p.maybeTypeAndValue(expr); ok {
 		if tv.IsType() {
 			w.p.fatalf(expr, "unexpected type expression %v", syntax.String(expr))
 		}
@@ -1698,8 +1714,7 @@ func (w *writer) expr(expr syntax.Expr) {
 		case types2.MethodExpr:
 			w.Code(exprMethodExpr)
 
-			tv, ok := w.p.info.Types[expr.X]
-			assert(ok)
+			tv := w.p.typeAndValue(expr.X)
 			assert(tv.IsType())
 
 			index := sel.Index()
@@ -1793,8 +1808,7 @@ func (w *writer) expr(expr syntax.Expr) {
 		w.implicitConvExpr(commonType, expr.Y)
 
 	case *syntax.CallExpr:
-		tv, ok := w.p.info.Types[expr.Fun]
-		assert(ok)
+		tv := w.p.typeAndValue(expr.Fun)
 		if tv.IsType() {
 			assert(len(expr.ArgList) == 1)
 			assert(!expr.HasDots)
@@ -1804,7 +1818,7 @@ func (w *writer) expr(expr syntax.Expr) {
 
 		var rtype types2.Type
 		if tv.IsBuiltin() {
-			switch obj, _ := lookupObj(w.p.info, expr.Fun); obj.Name() {
+			switch obj, _ := lookupObj(w.p, expr.Fun); obj.Name() {
 			case "make":
 				assert(len(expr.ArgList) >= 1)
 				assert(!expr.HasDots)
@@ -1870,7 +1884,7 @@ func (w *writer) expr(expr syntax.Expr) {
 
 			w.Bool(false) // not a method call (i.e., normal function call)
 
-			if obj, inst := lookupObj(w.p.info, fun); w.Bool(obj != nil && inst.TypeArgs.Len() != 0) {
+			if obj, inst := lookupObj(w.p, fun); w.Bool(obj != nil && inst.TypeArgs.Len() != 0) {
 				obj := obj.(*types2.Func)
 
 				w.pos(fun)
@@ -2244,8 +2258,7 @@ func (w *writer) convRTTI(src, dst types2.Type) {
 func (w *writer) exprType(iface types2.Type, typ syntax.Expr) {
 	base.Assertf(iface == nil || isInterface(iface), "%v must be nil or an interface type", iface)
 
-	tv, ok := w.p.info.Types[typ]
-	assert(ok)
+	tv := w.p.typeAndValue(typ)
 	assert(tv.IsType())
 
 	w.Sync(pkgbits.SyncExprType)
@@ -2432,7 +2445,9 @@ func (pw *pkgWriter) collectDecls(noders []*noder) {
 				}
 
 			default:
-				pw.errorf(l.pos, "//go:linkname must refer to declared function or variable")
+				if types.AllowsGoVersion(1, 18) {
+					pw.errorf(l.pos, "//go:linkname must refer to declared function or variable")
+				}
 			}
 		}
 	}
@@ -2597,12 +2612,11 @@ func isGlobal(obj types2.Object) bool {
 // lookupObj returns the object that expr refers to, if any. If expr
 // is an explicit instantiation of a generic object, then the instance
 // object is returned as well.
-func lookupObj(info *types2.Info, expr syntax.Expr) (obj types2.Object, inst types2.Instance) {
+func lookupObj(p *pkgWriter, expr syntax.Expr) (obj types2.Object, inst types2.Instance) {
 	if index, ok := expr.(*syntax.IndexExpr); ok {
 		args := unpackListExpr(index.Index)
 		if len(args) == 1 {
-			tv, ok := info.Types[args[0]]
-			assert(ok)
+			tv := p.typeAndValue(args[0])
 			if tv.IsValue() {
 				return // normal index expression
 			}
@@ -2613,15 +2627,15 @@ func lookupObj(info *types2.Info, expr syntax.Expr) (obj types2.Object, inst typ
 
 	// Strip package qualifier, if present.
 	if sel, ok := expr.(*syntax.SelectorExpr); ok {
-		if !isPkgQual(info, sel) {
+		if !isPkgQual(p.info, sel) {
 			return // normal selector expression
 		}
 		expr = sel.Sel
 	}
 
 	if name, ok := expr.(*syntax.Name); ok {
-		obj = info.Uses[name]
-		inst = info.Instances[name]
+		obj = p.info.Uses[name]
+		inst = p.info.Instances[name]
 	}
 	return
 }
@@ -2636,24 +2650,10 @@ func isPkgQual(info *types2.Info, sel *syntax.SelectorExpr) bool {
 	return false
 }
 
-// isMultiValueExpr reports whether expr is a function call expression
-// that yields multiple values.
-func isMultiValueExpr(info *types2.Info, expr syntax.Expr) bool {
-	tv, ok := info.Types[expr]
-	assert(ok)
-	assert(tv.IsValue())
-	if tuple, ok := tv.Type.(*types2.Tuple); ok {
-		assert(tuple.Len() > 1)
-		return true
-	}
-	return false
-}
-
 // isNil reports whether expr is a (possibly parenthesized) reference
 // to the predeclared nil value.
-func isNil(info *types2.Info, expr syntax.Expr) bool {
-	tv, ok := info.Types[expr]
-	assert(ok)
+func isNil(p *pkgWriter, expr syntax.Expr) bool {
+	tv := p.typeAndValue(expr)
 	return tv.IsNil()
 }
 
