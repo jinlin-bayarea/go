@@ -193,6 +193,8 @@ and the BuildID field to the build ID of the compiled package.
 
 The -find flag causes list to identify the named packages but not
 resolve their dependencies: the Imports and Deps lists will be empty.
+With the -find flag, the -deps, -test and -export commands cannot be
+used.
 
 The -test flag causes list to report not only the named packages
 but also their test binaries (for packages with tests), to convey to
@@ -446,7 +448,7 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 				// Clear all non-requested fields.
 				for i := 0; i < v.NumField(); i++ {
 					if !listJsonFields.needAny(v.Type().Field(i).Name) {
-						v.Field(i).Set(reflect.Zero(v.Type().Field(i).Type))
+						v.Field(i).SetZero()
 					}
 				}
 			}
@@ -592,6 +594,9 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 	if *listFind && *listTest {
 		base.Fatalf("go list -test cannot be used with -find")
 	}
+	if *listFind && *listExport {
+		base.Fatalf("go list -export cannot be used with -find")
+	}
 
 	pkgOpts := load.PackageOpts{
 		IgnoreImports:   *listFind,
@@ -728,19 +733,20 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 		}
 	}
 
-	if *listTest {
+	if *listTest || (cfg.BuildPGO == "auto" && len(cmdline) > 1) {
 		all := pkgs
 		if !*listDeps {
 			all = loadPackageList(pkgs)
 		}
 		// Update import paths to distinguish the real package p
-		// from p recompiled for q.test.
+		// from p recompiled for q.test, or to distinguish between
+		// p compiled with different PGO profiles.
 		// This must happen only once the build code is done
 		// looking at import paths, because it will get very confused
 		// if it sees these.
 		old := make(map[string]string)
 		for _, p := range all {
-			if p.ForTest != "" {
+			if p.ForTest != "" || p.Internal.ForMain != "" {
 				new := p.Desc()
 				old[new] = p.ImportPath
 				p.ImportPath = new
@@ -751,7 +757,7 @@ func runList(ctx context.Context, cmd *base.Command, args []string) {
 		m := make(map[string]string)
 		for _, p := range all {
 			for _, p1 := range p.Internal.Imports {
-				if p1.ForTest != "" {
+				if p1.ForTest != "" || p1.Internal.ForMain != "" {
 					m[old[p1.ImportPath]] = p1.ImportPath
 				}
 			}

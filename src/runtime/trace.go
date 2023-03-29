@@ -66,9 +66,9 @@ const (
 	traceEvGoBlockGC         = 42 // goroutine blocks on GC assist [timestamp, stack]
 	traceEvGCMarkAssistStart = 43 // GC mark assist start [timestamp, stack]
 	traceEvGCMarkAssistDone  = 44 // GC mark assist done [timestamp]
-	traceEvUserTaskCreate    = 45 // trace.NewContext [timestamp, internal task id, internal parent task id, stack, name string]
+	traceEvUserTaskCreate    = 45 // trace.NewTask [timestamp, internal task id, internal parent task id, name string, stack]
 	traceEvUserTaskEnd       = 46 // end of a task [timestamp, internal task id, stack]
-	traceEvUserRegion        = 47 // trace.WithRegion [timestamp, internal task id, mode(0:start, 1:end), stack, name string]
+	traceEvUserRegion        = 47 // trace.WithRegion [timestamp, internal task id, mode(0:start, 1:end), name string, stack]
 	traceEvUserLog           = 48 // trace.Log [timestamp, internal task id, key string id, stack, value string]
 	traceEvCPUSample         = 49 // CPU profiling sample [timestamp, real timestamp, real P id (-1 when absent), goroutine id, stack]
 	traceEvCount             = 50
@@ -312,11 +312,14 @@ func StartTrace() error {
 	for i, label := range gcMarkWorkerModeStrings[:] {
 		trace.markWorkerLabels[i], bufp = traceString(bufp, pid, label)
 	}
-	traceReleaseBuffer(pid)
+	traceReleaseBuffer(mp, pid)
 
 	unlock(&trace.bufLock)
 
 	unlock(&sched.sysmonlock)
+
+	// Record the current state of HeapGoal to avoid information loss in trace.
+	traceHeapGoal()
 
 	startTheWorldGC()
 	return nil
@@ -676,7 +679,7 @@ func traceEvent(ev byte, skip int, args ...uint64) {
 	//
 	// Note trace_userTaskCreate runs the same check.
 	if !trace.enabled && !mp.startingtrace {
-		traceReleaseBuffer(pid)
+		traceReleaseBuffer(mp, pid)
 		return
 	}
 
@@ -686,7 +689,7 @@ func traceEvent(ev byte, skip int, args ...uint64) {
 		}
 	}
 	traceEventLocked(0, mp, pid, bufp, ev, 0, skip, args...)
-	traceReleaseBuffer(pid)
+	traceReleaseBuffer(mp, pid)
 }
 
 // traceEventLocked writes a single event of type ev to the trace buffer bufp,
@@ -907,11 +910,11 @@ func traceAcquireBuffer() (mp *m, pid int32, bufp *traceBufPtr) {
 }
 
 // traceReleaseBuffer releases a buffer previously acquired with traceAcquireBuffer.
-func traceReleaseBuffer(pid int32) {
+func traceReleaseBuffer(mp *m, pid int32) {
 	if pid == traceGlobProc {
 		unlock(&trace.bufLock)
 	}
-	releasem(getg().m)
+	releasem(mp)
 }
 
 // lockRankMayTraceFlush records the lock ranking effects of a
@@ -1499,13 +1502,13 @@ func trace_userTaskCreate(id, parentID uint64, taskType string) {
 	// Same as in traceEvent.
 	mp, pid, bufp := traceAcquireBuffer()
 	if !trace.enabled && !mp.startingtrace {
-		traceReleaseBuffer(pid)
+		traceReleaseBuffer(mp, pid)
 		return
 	}
 
 	typeStringID, bufp := traceString(bufp, pid, taskType)
 	traceEventLocked(0, mp, pid, bufp, traceEvUserTaskCreate, 0, 3, id, parentID, typeStringID)
-	traceReleaseBuffer(pid)
+	traceReleaseBuffer(mp, pid)
 }
 
 //go:linkname trace_userTaskEnd runtime/trace.userTaskEnd
@@ -1521,13 +1524,13 @@ func trace_userRegion(id, mode uint64, name string) {
 
 	mp, pid, bufp := traceAcquireBuffer()
 	if !trace.enabled && !mp.startingtrace {
-		traceReleaseBuffer(pid)
+		traceReleaseBuffer(mp, pid)
 		return
 	}
 
 	nameStringID, bufp := traceString(bufp, pid, name)
 	traceEventLocked(0, mp, pid, bufp, traceEvUserRegion, 0, 3, id, mode, nameStringID)
-	traceReleaseBuffer(pid)
+	traceReleaseBuffer(mp, pid)
 }
 
 //go:linkname trace_userLog runtime/trace.userLog
@@ -1538,16 +1541,18 @@ func trace_userLog(id uint64, category, message string) {
 
 	mp, pid, bufp := traceAcquireBuffer()
 	if !trace.enabled && !mp.startingtrace {
-		traceReleaseBuffer(pid)
+		traceReleaseBuffer(mp, pid)
 		return
 	}
 
 	categoryID, bufp := traceString(bufp, pid, category)
 
-	extraSpace := traceBytesPerNumber + len(message) // extraSpace for the value string
+	// The log message is recorded after all of the normal trace event
+	// arguments, including the task, category, and stack IDs. We must ask
+	// traceEventLocked to reserve extra space for the length of the message
+	// and the message itself.
+	extraSpace := traceBytesPerNumber + len(message)
 	traceEventLocked(extraSpace, mp, pid, bufp, traceEvUserLog, 0, 3, id, categoryID)
-	// traceEventLocked reserved extra space for val and len(val)
-	// in buf, so buf now has room for the following.
 	buf := bufp.ptr()
 
 	// double-check the message and its length can fit.
@@ -1559,7 +1564,7 @@ func trace_userLog(id uint64, category, message string) {
 	buf.varint(uint64(slen))
 	buf.pos += copy(buf.arr[buf.pos:], message[:slen])
 
-	traceReleaseBuffer(pid)
+	traceReleaseBuffer(mp, pid)
 }
 
 // the start PC of a goroutine for tracing purposes. If pc is a wrapper,

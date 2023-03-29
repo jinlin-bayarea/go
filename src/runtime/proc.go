@@ -210,6 +210,10 @@ func main() {
 
 	main_init_done = make(chan bool)
 	if iscgo {
+		if _cgo_pthread_key_created == nil {
+			throw("_cgo_pthread_key_created missing")
+		}
+
 		if _cgo_thread_start == nil {
 			throw("_cgo_thread_start missing")
 		}
@@ -224,6 +228,13 @@ func main() {
 		if _cgo_notify_runtime_init_done == nil {
 			throw("_cgo_notify_runtime_init_done missing")
 		}
+
+		// Set the x_crosscall2_ptr C function pointer variable point to crosscall2.
+		if set_crosscall2 == nil {
+			throw("set_crosscall2 missing")
+		}
+		set_crosscall2()
+
 		// Start the template thread in case we enter Go from
 		// a C-created thread and need to create a new thread.
 		startTemplateThread()
@@ -312,10 +323,10 @@ func forcegchelper() {
 	}
 }
 
-//go:nosplit
-
 // Gosched yields the processor, allowing other goroutines to run. It does not
 // suspend the current goroutine, so execution resumes automatically.
+//
+//go:nosplit
 func Gosched() {
 	checkTimeouts()
 	mcall(gosched_m)
@@ -1870,8 +1881,9 @@ func allocm(pp *p, fn func(), id int64) *m {
 // pressed into service as the scheduling stack and current
 // goroutine for the duration of the cgo callback.
 //
-// When the callback is done with the m, it calls dropm to
-// put the m back on the list.
+// It calls dropm to put the m back on the list,
+// 1. when the callback is done with the m in non-pthread platforms,
+// 2. or when the C thread exiting on pthread platforms.
 //
 //go:nosplit
 func needm() {
@@ -1933,6 +1945,11 @@ func needm() {
 	gp.stack.lo = getcallersp() - 32*1024
 	gp.stackguard0 = gp.stack.lo + _StackGuard
 
+	// Should mark we are already in Go now.
+	// Otherwise, we may call needm again when we get a signal, before cgocallbackg1,
+	// which means the extram list may be empty, that will cause a deadlock.
+	mp.isExtraInC = false
+
 	// Initialize this thread to use the m.
 	asminit()
 	minit()
@@ -1940,6 +1957,17 @@ func needm() {
 	// mp.curg is now a real goroutine.
 	casgstatus(mp.curg, _Gdead, _Gsyscall)
 	sched.ngsys.Add(-1)
+}
+
+// Acquire an extra m and bind it to the C thread when a pthread key has been created.
+//
+//go:nosplit
+func needAndBindM() {
+	needm()
+
+	if _cgo_pthread_key_created != nil && *(*uintptr)(_cgo_pthread_key_created) != 0 {
+		cgoBindM()
+	}
 }
 
 // newextram allocates m's and puts them on the extra list.
@@ -1986,6 +2014,8 @@ func oneNewExtraM() {
 	gp.m = mp
 	mp.curg = gp
 	mp.isextra = true
+	// mark we are in C by default.
+	mp.isExtraInC = true
 	mp.lockedInt++
 	mp.lockedg.set(gp)
 	gp.lockedm.set(mp)
@@ -2018,9 +2048,11 @@ func oneNewExtraM() {
 	unlockextra(mp)
 }
 
+// dropm puts the current m back onto the extra list.
+//
+// 1. On systems without pthreads, like Windows
 // dropm is called when a cgo callback has called needm but is now
 // done with the callback and returning back into the non-Go thread.
-// It puts the current m back onto the extra list.
 //
 // The main expense here is the call to signalstack to release the
 // m's signal stack, and then the call to needm on the next callback
@@ -2032,15 +2064,18 @@ func oneNewExtraM() {
 // call. These should typically not be scheduling operations, just a few
 // atomics, so the cost should be small.
 //
-// TODO(rsc): An alternative would be to allocate a dummy pthread per-thread
-// variable using pthread_key_create. Unlike the pthread keys we already use
-// on OS X, this dummy key would never be read by Go code. It would exist
-// only so that we could register at thread-exit-time destructor.
-// That destructor would put the m back onto the extra list.
-// This is purely a performance optimization. The current version,
-// in which dropm happens on each cgo call, is still correct too.
-// We may have to keep the current version on systems with cgo
-// but without pthreads, like Windows.
+// 2. On systems with pthreads
+// dropm is called while a non-Go thread is exiting.
+// We allocate a pthread per-thread variable using pthread_key_create,
+// to register a thread-exit-time destructor.
+// And store the g into a thread-specific value associated with the pthread key,
+// when first return back to C.
+// So that the destructor would invoke dropm while the non-Go thread is exiting.
+// This is much faster since it avoids expensive signal-related syscalls.
+//
+// NOTE: this always runs without a P, so, nowritebarrierrec required.
+//
+//go:nowritebarrierrec
 func dropm() {
 	// Clear m and g, and return m to the extra list.
 	// After the call to setg we can only call nosplit functions
@@ -2070,6 +2105,39 @@ func dropm() {
 	unlockextra(mp)
 
 	msigrestore(sigmask)
+}
+
+// bindm store the g0 of the current m into a thread-specific value.
+//
+// We allocate a pthread per-thread variable using pthread_key_create,
+// to register a thread-exit-time destructor.
+// We are here setting the thread-specific value of the pthread key, to enable the destructor.
+// So that the pthread_key_destructor would dropm while the C thread is exiting.
+//
+// And the saved g will be used in pthread_key_destructor,
+// since the g stored in the TLS by Go might be cleared in some platforms,
+// before the destructor invoked, so, we restore g by the stored g, before dropm.
+//
+// We store g0 instead of m, to make the assembly code simpler,
+// since we need to restore g0 in runtime.cgocallback.
+//
+// On systems without pthreads, like Windows, bindm shouldn't be used.
+//
+// NOTE: this always runs without a P, so, nowritebarrierrec required.
+//
+//go:nosplit
+//go:nowritebarrierrec
+func cgoBindM() {
+	if GOOS == "windows" || GOOS == "plan9" {
+		fatal("bindm in unexpected GOOS")
+	}
+	g := getg()
+	if g.m.g0 != g {
+		fatal("the current g is not g0")
+	}
+	if _cgo_bindm != nil {
+		asmcgocall(_cgo_bindm, unsafe.Pointer(g))
+	}
 }
 
 // A helper function for EnsureDropM.
@@ -4356,7 +4424,7 @@ func saveAncestors(callergp *g) *[]ancestorInfo {
 	ancestors := make([]ancestorInfo, n)
 	copy(ancestors[1:], callerAncestors)
 
-	var pcs [_TracebackMaxFrames]uintptr
+	var pcs [tracebackInnerFrames]uintptr
 	npcs := gcallers(callergp, 0, pcs[:])
 	ipcs := make([]uintptr, npcs)
 	copy(ipcs, pcs[:])
@@ -4516,8 +4584,6 @@ func dolockOSThread() {
 	gp.lockedm.set(gp.m)
 }
 
-//go:nosplit
-
 // LockOSThread wires the calling goroutine to its current operating system thread.
 // The calling goroutine will always execute in that thread,
 // and no other goroutine will execute in it,
@@ -4532,6 +4598,8 @@ func dolockOSThread() {
 //
 // A goroutine should call LockOSThread before calling OS services or
 // non-Go library functions that depend on per-thread state.
+//
+//go:nosplit
 func LockOSThread() {
 	if atomic.Load(&newmHandoff.haveTemplateThread) == 0 && GOOS != "plan9" {
 		// If we need to start a new thread from the locked
@@ -4571,8 +4639,6 @@ func dounlockOSThread() {
 	gp.lockedm = 0
 }
 
-//go:nosplit
-
 // UnlockOSThread undoes an earlier call to LockOSThread.
 // If this drops the number of active LockOSThread calls on the
 // calling goroutine to zero, it unwires the calling goroutine from
@@ -4585,6 +4651,8 @@ func dounlockOSThread() {
 // other goroutines, it should not call this function and thus leave
 // the goroutine locked to the OS thread until the goroutine (and
 // hence the thread) exits.
+//
+//go:nosplit
 func UnlockOSThread() {
 	gp := getg()
 	if gp.m.lockedExt == 0 {
@@ -4687,6 +4755,7 @@ func sigprof(pc, sp, lr uintptr, gp *g, mp *m) {
 	// See golang.org/issue/17165.
 	getg().m.mallocing++
 
+	var u unwinder
 	var stk [maxCPUProfStack]uintptr
 	n := 0
 	if mp.ncgo > 0 && mp.curg != nil && mp.curg.syscallpc != 0 && mp.curg.syscallsp != 0 {
@@ -4700,26 +4769,24 @@ func sigprof(pc, sp, lr uintptr, gp *g, mp *m) {
 			for cgoOff < len(mp.cgoCallers) && mp.cgoCallers[cgoOff] != 0 {
 				cgoOff++
 			}
-			copy(stk[:], mp.cgoCallers[:cgoOff])
+			n += copy(stk[:], mp.cgoCallers[:cgoOff])
 			mp.cgoCallers[0] = 0
 		}
 
 		// Collect Go stack that leads to the cgo call.
-		n = gentraceback(mp.curg.syscallpc, mp.curg.syscallsp, 0, mp.curg, 0, &stk[cgoOff], len(stk)-cgoOff, nil, nil, 0)
-		if n > 0 {
-			n += cgoOff
-		}
+		u.initAt(mp.curg.syscallpc, mp.curg.syscallsp, 0, mp.curg, unwindSilentErrors)
 	} else if usesLibcall() && mp.libcallg != 0 && mp.libcallpc != 0 && mp.libcallsp != 0 {
 		// Libcall, i.e. runtime syscall on windows.
 		// Collect Go stack that leads to the call.
-		n = gentraceback(mp.libcallpc, mp.libcallsp, 0, mp.libcallg.ptr(), 0, &stk[n], len(stk[n:]), nil, nil, 0)
+		u.initAt(mp.libcallpc, mp.libcallsp, 0, mp.libcallg.ptr(), unwindSilentErrors)
 	} else if mp != nil && mp.vdsoSP != 0 {
 		// VDSO call, e.g. nanotime1 on Linux.
 		// Collect Go stack that leads to the call.
-		n = gentraceback(mp.vdsoPC, mp.vdsoSP, 0, gp, 0, &stk[n], len(stk[n:]), nil, nil, _TraceJumpStack)
+		u.initAt(mp.vdsoPC, mp.vdsoSP, 0, gp, unwindSilentErrors|unwindJumpStack)
 	} else {
-		n = gentraceback(pc, sp, lr, gp, 0, &stk[0], len(stk), nil, nil, _TraceTrap|_TraceJumpStack)
+		u.initAt(pc, sp, lr, gp, unwindSilentErrors|unwindTrap|unwindJumpStack)
 	}
+	n += tracebackPCs(&u, 0, stk[n:])
 
 	if n <= 0 {
 		// Normal traceback is impossible or has failed.

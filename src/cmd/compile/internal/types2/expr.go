@@ -313,6 +313,12 @@ func representableConst(x constant.Value, check *Checker, typ *Basic, rounded *c
 		conf = check.conf
 	}
 
+	sizeof := func(T Type) int64 {
+		s := conf.sizeof(T)
+		assert(s == 4 || s == 8)
+		return s
+	}
+
 	switch {
 	case isInteger(typ):
 		x := constant.ToInt(x)
@@ -325,7 +331,7 @@ func representableConst(x constant.Value, check *Checker, typ *Basic, rounded *c
 		if x, ok := constant.Int64Val(x); ok {
 			switch typ.kind {
 			case Int:
-				var s = uint(conf.sizeof(typ)) * 8
+				var s = uint(sizeof(typ)) * 8
 				return int64(-1)<<(s-1) <= x && x <= int64(1)<<(s-1)-1
 			case Int8:
 				const s = 8
@@ -339,7 +345,7 @@ func representableConst(x constant.Value, check *Checker, typ *Basic, rounded *c
 			case Int64, UntypedInt:
 				return true
 			case Uint, Uintptr:
-				if s := uint(conf.sizeof(typ)) * 8; s < 64 {
+				if s := uint(sizeof(typ)) * 8; s < 64 {
 					return 0 <= x && x <= int64(1)<<s-1
 				}
 				return 0 <= x
@@ -361,7 +367,7 @@ func representableConst(x constant.Value, check *Checker, typ *Basic, rounded *c
 		// x does not fit into int64
 		switch n := constant.BitLen(x); typ.kind {
 		case Uint, Uintptr:
-			var s = uint(conf.sizeof(typ)) * 8
+			var s = uint(sizeof(typ)) * 8
 			return constant.Sign(x) >= 0 && n <= int(s)
 		case Uint64:
 			return constant.Sign(x) >= 0 && n <= 64
@@ -1794,12 +1800,10 @@ func keyVal(x constant.Value) interface{} {
 
 // typeAssertion checks x.(T). The type of x must be an interface.
 func (check *Checker) typeAssertion(e syntax.Expr, x *operand, T Type, typeSwitch bool) {
-	method, alt := check.assertableTo(under(x.typ).(*Interface), T)
-	if method == nil {
+	var cause string
+	if check.assertableTo(x.typ, T, &cause) {
 		return // success
 	}
-
-	cause := check.missingMethodCause(T, x.typ, method, alt)
 
 	if typeSwitch {
 		check.errorf(e, ImpossibleAssert, "impossible type switch case: %s\n\t%s cannot have dynamic type %s %s", e, x, T, cause)
@@ -1818,10 +1822,37 @@ func (check *Checker) expr(x *operand, e syntax.Expr) {
 	check.singleValue(x)
 }
 
-// multiExpr is like expr but the result may also be a multi-value.
-func (check *Checker) multiExpr(x *operand, e syntax.Expr) {
-	check.rawExpr(x, e, nil, false)
-	check.exclude(x, 1<<novalue|1<<builtin|1<<typexpr)
+// multiExpr typechecks e and returns its value (or values) in list.
+// If allowCommaOk is set and e is a map index, comma-ok, or comma-err
+// expression, the result is a two-element list containing the value
+// of e, and an untyped bool value or an error value, respectively.
+// If an error occurred, list[0] is not valid.
+func (check *Checker) multiExpr(e syntax.Expr, allowCommaOk bool) (list []*operand, commaOk bool) {
+	var x operand
+	check.rawExpr(&x, e, nil, false)
+	check.exclude(&x, 1<<novalue|1<<builtin|1<<typexpr)
+
+	if t, ok := x.typ.(*Tuple); ok && x.mode != invalid {
+		// multiple values
+		list = make([]*operand, t.Len())
+		for i, v := range t.vars {
+			list[i] = &operand{mode: value, expr: e, typ: v.typ}
+		}
+		return
+	}
+
+	// exactly one (possibly invalid or comma-ok) value
+	list = []*operand{&x}
+	if allowCommaOk && (x.mode == mapindex || x.mode == commaok || x.mode == commaerr) {
+		x2 := &operand{mode: value, expr: e, typ: Typ[UntypedBool]}
+		if x.mode == commaerr {
+			x2.typ = universeError
+		}
+		list = append(list, x2)
+		commaOk = true
+	}
+
+	return
 }
 
 // exprWithHint typechecks expression e and initializes x with the expression value;

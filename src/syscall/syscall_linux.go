@@ -646,8 +646,7 @@ func anyToSockaddr(rsa *RawSockaddrAny) (Sockaddr, error) {
 		for n < len(pp.Path) && pp.Path[n] != 0 {
 			n++
 		}
-		bytes := (*[len(pp.Path)]byte)(unsafe.Pointer(&pp.Path[0]))[0:n]
-		sa.Name = string(bytes)
+		sa.Name = string(unsafe.Slice((*byte)(unsafe.Pointer(&pp.Path[0])), n))
 		return sa, nil
 
 	case AF_INET:
@@ -1059,7 +1058,7 @@ func Getpgrp() (pid int) {
 //sys	Mknodat(dirfd int, path string, mode uint32, dev int) (err error)
 //sys	Nanosleep(time *Timespec, leftover *Timespec) (err error)
 //sys	PivotRoot(newroot string, putold string) (err error) = SYS_PIVOT_ROOT
-//sysnb prlimit(pid int, resource int, newlimit *Rlimit, old *Rlimit) (err error) = SYS_PRLIMIT64
+//sysnb prlimit1(pid int, resource int, newlimit *Rlimit, old *Rlimit) (err error) = SYS_PRLIMIT64
 //sys	read(fd int, p []byte) (n int, err error)
 //sys	Removexattr(path string, attr string) (err error)
 //sys	Setdomainname(p []byte) (err error)
@@ -1262,3 +1261,14 @@ func Munmap(b []byte) (err error) {
 //sys	Munlock(b []byte) (err error)
 //sys	Mlockall(flags int) (err error)
 //sys	Munlockall() (err error)
+
+// prlimit changes a resource limit. We use a single definition so that
+// we can tell StartProcess to not restore the original NOFILE limit.
+// This is unexported but can be called from x/sys/unix.
+func prlimit(pid int, resource int, newlimit *Rlimit, old *Rlimit) (err error) {
+	err = prlimit1(pid, resource, newlimit, old)
+	if err == nil && newlimit != nil && resource == RLIMIT_NOFILE {
+		origRlimitNofile.Store(Rlimit{0, 0})
+	}
+	return err
+}

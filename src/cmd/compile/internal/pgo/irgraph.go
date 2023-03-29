@@ -49,7 +49,6 @@ import (
 	"cmd/compile/internal/types"
 	"fmt"
 	"internal/profile"
-	"log"
 	"os"
 )
 
@@ -127,22 +126,20 @@ type Profile struct {
 }
 
 // New generates a profile-graph from the profile.
-func New(profileFile string) *Profile {
+func New(profileFile string) (*Profile, error) {
 	f, err := os.Open(profileFile)
 	if err != nil {
-		log.Fatal("failed to open file " + profileFile)
-		return nil
+		return nil, fmt.Errorf("error opening profile: %w", err)
 	}
 	defer f.Close()
 	profile, err := profile.Parse(f)
 	if err != nil {
-		log.Fatal("failed to Parse profile file.")
-		return nil
+		return nil, fmt.Errorf("error parsing profile: %w", err)
 	}
 
 	if len(profile.Sample) == 0 {
 		// We accept empty profiles, but there is nothing to do.
-		return nil
+		return nil, nil
 	}
 
 	valueIndex := -1
@@ -157,8 +154,7 @@ func New(profileFile string) *Profile {
 	}
 
 	if valueIndex == -1 {
-		log.Fatal("failed to find CPU samples count or CPU nanoseconds value-types in profile.")
-		return nil
+		return nil, fmt.Errorf(`profile does not contain a sample index with value/type "samples/count" or cpu/nanoseconds"`)
 	}
 
 	g := newGraph(profile, &Options{
@@ -174,14 +170,18 @@ func New(profileFile string) *Profile {
 	}
 
 	// Build the node map and totals from the profile graph.
-	if !p.processprofileGraph(g) {
-		return nil
+	if err := p.processprofileGraph(g); err != nil {
+		return nil, err
+	}
+
+	if p.TotalNodeWeight == 0 || p.TotalEdgeWeight == 0 {
+		return nil, nil // accept but ignore profile with no samples.
 	}
 
 	// Create package-level call graph with weights from profile and IR.
 	p.initializeIRGraph()
 
-	return p
+	return p, nil
 }
 
 // processprofileGraph builds various maps from the profile-graph.
@@ -189,8 +189,9 @@ func New(profileFile string) *Profile {
 // It initializes NodeMap and Total{Node,Edge}Weight based on the name and
 // callsite to compute node and edge weights which will be used later on to
 // create edges for WeightedCG.
-// Returns whether it successfully processed the profile.
-func (p *Profile) processprofileGraph(g *Graph) bool {
+//
+// Caller should ignore the profile if p.TotalNodeWeight == 0 || p.TotalEdgeWeight == 0.
+func (p *Profile) processprofileGraph(g *Graph) error {
 	nFlat := make(map[string]int64)
 	nCum := make(map[string]int64)
 	seenStartLine := false
@@ -231,17 +232,17 @@ func (p *Profile) processprofileGraph(g *Graph) bool {
 	}
 
 	if p.TotalNodeWeight == 0 || p.TotalEdgeWeight == 0 {
-		return false // accept but ignore profile with no sample
+		return nil // accept but ignore profile with no samples.
 	}
 
 	if !seenStartLine {
-		// TODO(prattic): If Function.start_line is missing we could
+		// TODO(prattmic): If Function.start_line is missing we could
 		// fall back to using absolute line numbers, which is better
 		// than nothing.
-		log.Fatal("PGO profile missing Function.start_line data (Go version of profiled application too old? Go 1.20+ automatically adds this to profiles)")
+		return fmt.Errorf("profile missing Function.start_line data (Go version of profiled application too old? Go 1.20+ automatically adds this to profiles)")
 	}
 
-	return true
+	return nil
 }
 
 // initializeIRGraph builds the IRGraph by visiting all the ir.Func in decl list
@@ -250,14 +251,14 @@ func (p *Profile) initializeIRGraph() {
 	// Bottomup walk over the function to create IRGraph.
 	ir.VisitFuncsBottomUp(typecheck.Target.Decls, func(list []*ir.Func, recursive bool) {
 		for _, n := range list {
-			p.VisitIR(n, recursive)
+			p.VisitIR(n)
 		}
 	})
 }
 
 // VisitIR traverses the body of each ir.Func and use NodeMap to determine if
 // we need to add an edge from ir.Func and any node in the ir.Func body.
-func (p *Profile) VisitIR(fn *ir.Func, recursive bool) {
+func (p *Profile) VisitIR(fn *ir.Func) {
 	g := p.WeightedCG
 
 	if g.IRNodes == nil {
@@ -457,37 +458,36 @@ func (p *Profile) PrintWeightedCallGraphDOT(edgeThreshold float64) {
 func (p *Profile) RedirectEdges(cur *IRNode, inlinedCallSites map[CallSiteInfo]struct{}) {
 	g := p.WeightedCG
 
-	for i, outEdge := range g.OutEdges[cur] {
-		if _, found := inlinedCallSites[CallSiteInfo{LineOffset: outEdge.CallSiteOffset, Caller: cur.AST}]; !found {
+	i := 0
+	outs := g.OutEdges[cur]
+	for i < len(outs) {
+		outEdge := outs[i]
+		redirected := false
+		_, found := inlinedCallSites[CallSiteInfo{LineOffset: outEdge.CallSiteOffset, Caller: cur.AST}]
+		if !found {
 			for _, InEdge := range g.InEdges[cur] {
 				if _, ok := inlinedCallSites[CallSiteInfo{LineOffset: InEdge.CallSiteOffset, Caller: InEdge.Src.AST}]; ok {
 					weight := g.calculateWeight(InEdge.Src, cur)
-					g.redirectEdge(InEdge.Src, cur, outEdge, weight, i)
+					g.redirectEdge(InEdge.Src, outEdge, weight)
+					redirected = true
 				}
 			}
-		} else {
-			g.remove(cur, i)
 		}
+		if found || redirected {
+			g.remove(cur, i)
+			outs = g.OutEdges[cur]
+			continue
+		}
+		i++
 	}
 }
 
-// redirectEdges deletes the cur node out-edges and redirect them so now these
-// edges are the parent node out-edges.
-func (g *IRGraph) redirectEdges(parent *IRNode, cur *IRNode) {
-	for _, outEdge := range g.OutEdges[cur] {
-		outEdge.Src = parent
-		g.OutEdges[parent] = append(g.OutEdges[parent], outEdge)
-	}
-	delete(g.OutEdges, cur)
-}
-
-// redirectEdge deletes the cur-node's out-edges and redirect them so now these
-// edges are the parent node out-edges.
-func (g *IRGraph) redirectEdge(parent *IRNode, cur *IRNode, outEdge *IREdge, weight int64, idx int) {
-	outEdge.Src = parent
-	outEdge.Weight = weight * outEdge.Weight
-	g.OutEdges[parent] = append(g.OutEdges[parent], outEdge)
-	g.remove(cur, idx)
+// redirectEdge redirects a node's out-edge to one of its parent nodes, cloning is
+// required as the node might be inlined in multiple call-sites.
+// TODO: adjust the in-edges of outEdge.Dst if necessary
+func (g *IRGraph) redirectEdge(parent *IRNode, outEdge *IREdge, weight int64) {
+	edge := &IREdge{Src: parent, Dst: outEdge.Dst, Weight: weight * outEdge.Weight, CallSiteOffset: outEdge.CallSiteOffset}
+	g.OutEdges[parent] = append(g.OutEdges[parent], edge)
 }
 
 // remove deletes the cur-node's out-edges at index idx.

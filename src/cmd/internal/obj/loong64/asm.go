@@ -324,6 +324,9 @@ var optab = []Optab{
 	{AMOVV, C_REG, C_NONE, C_FREG, C_NONE, 47, 4, 0, sys.Loong64, 0},
 	{AMOVV, C_FREG, C_NONE, C_REG, C_NONE, 48, 4, 0, sys.Loong64, 0},
 
+	{AMOVV, C_FCCREG, C_NONE, C_REG, C_NONE, 63, 4, 0, sys.Loong64, 0},
+	{AMOVV, C_REG, C_NONE, C_FCCREG, C_NONE, 64, 4, 0, sys.Loong64, 0},
+
 	{AMOVW, C_ADDCON, C_NONE, C_FREG, C_NONE, 34, 8, 0, sys.Loong64, 0},
 	{AMOVW, C_ANDCON, C_NONE, C_FREG, C_NONE, 34, 8, 0, sys.Loong64, 0},
 
@@ -435,9 +438,6 @@ func span0(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 					q.Pos = p.Pos
 					q.To.Type = obj.TYPE_BRANCH
 					q.To.SetTarget(q.Link.Link)
-
-					c.addnop(p.Link)
-					c.addnop(p)
 					bflag = 1
 				}
 			}
@@ -1179,26 +1179,26 @@ func (c *ctxt0) asmout(p *obj.Prog, o *Optab, out []uint32) {
 
 	case 6: // beq r1,[r2],sbra
 		v := int32(0)
-		vcmp := int32(0)
 		if p.To.Target() != nil {
 			v = int32(p.To.Target().Pc-p.Pc) >> 2
 		}
-		if v < 0 {
-			vcmp = -v
-		}
-		if (p.As == ABFPT || p.As == ABFPF) && ((uint32(vcmp))>>21)&0x7FF != 0 {
-			c.ctxt.Diag("21 bit-width, short branch too far\n%v", p)
-		} else if p.As != ABFPT && p.As != ABFPF && (v<<16)>>16 != v {
-			c.ctxt.Diag("16 bit-width, short branch too far\n%v", p)
-		}
+		rd, rj := p.Reg, p.From.Reg
 		if p.As == ABGTZ || p.As == ABLEZ {
-			o1 = OP_16IRR(c.opirr(p.As), uint32(v), uint32(p.Reg), uint32(p.From.Reg))
-		} else if p.As == ABFPT || p.As == ABFPF {
-			// BCNEZ cj offset21 ,cj = fcc0
-			// BCEQZ cj offset21 ,cj = fcc0
+			rd, rj = rj, rd
+		}
+		switch p.As {
+		case ABFPT, ABFPF:
+			if (v<<11)>>11 != v {
+				c.ctxt.Diag("21 bit-width, short branch too far\n%v", p)
+			}
+			// FCC0 is the implicit source operand, now that we
+			// don't register-allocate from the FCC bank.
 			o1 = OP_16IR_5I(c.opirr(p.As), uint32(v), uint32(REG_FCC0))
-		} else {
-			o1 = OP_16IRR(c.opirr(p.As), uint32(v), uint32(p.From.Reg), uint32(p.Reg))
+		default:
+			if (v<<16)>>16 != v {
+				c.ctxt.Diag("16 bit-width, short branch too far\n%v", p)
+			}
+			o1 = OP_16IRR(c.opirr(p.As), uint32(v), uint32(rj), uint32(rd))
 		}
 
 	case 7: // mov r, soreg
@@ -1243,24 +1243,14 @@ func (c *ctxt0) asmout(p *obj.Prog, o *Optab, out []uint32) {
 
 	case 11: // jmp lbra
 		v := int32(0)
-		if c.aclass(&p.To) == C_SBRA && p.To.Sym == nil && p.As == AJMP {
-			// use PC-relative branch for short branches
-			// BEQ	R0, R0, sbra
-			if p.To.Target() != nil {
-				v = int32(p.To.Target().Pc-p.Pc) >> 2
-			}
-			if (v<<16)>>16 == v {
-				o1 = OP_16IRR(c.opirr(ABEQ), uint32(v), uint32(REGZERO), uint32(REGZERO))
-				break
-			}
-		}
-		if p.To.Target() == nil {
-			v = int32(p.Pc) >> 2
-		} else {
-			v = int32(p.To.Target().Pc) >> 2
+		if p.To.Target() != nil {
+			v = int32(p.To.Target().Pc-p.Pc) >> 2
 		}
 		o1 = OP_B_BL(c.opirr(p.As), uint32(v))
 		if p.To.Sym == nil {
+			if p.As == AJMP {
+				break
+			}
 			p.To.Sym = c.cursym.Func().Text.From.Sym
 			p.To.Offset = p.To.Target().Pc
 		}
@@ -1625,6 +1615,14 @@ func (c *ctxt0) asmout(p *obj.Prog, o *Optab, out []uint32) {
 
 	case 62: // rdtimex rd, rj
 		o1 = OP_RR(c.oprr(p.As), uint32(p.To.Reg), uint32(p.RegTo2))
+
+	case 63: // movv c_fcc0, c_reg ==> movcf2gr rd, cj
+		a := OP_TEN(8, 1335)
+		o1 = OP_RR(a, uint32(p.From.Reg), uint32(p.To.Reg))
+
+	case 64: // movv c_reg, c_fcc0 ==> movgr2cf cd, rj
+		a := OP_TEN(8, 1334)
+		o1 = OP_RR(a, uint32(p.From.Reg), uint32(p.To.Reg))
 	}
 
 	out[0] = o1
@@ -1850,6 +1848,8 @@ func (c *ctxt0) opir(a obj.As) uint32 {
 		return 0x0a << 25
 	case ALU32ID:
 		return 0x0b << 25
+	case APCALAU12I:
+		return 0x0d << 25
 	case APCADDU12I:
 		return 0x0e << 25
 	}
