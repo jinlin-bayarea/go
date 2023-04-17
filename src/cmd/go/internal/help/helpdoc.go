@@ -34,7 +34,7 @@ var HelpPackages = &base.Command{
 	Long: `
 Many commands apply to a set of packages:
 
-	go action [packages]
+	go <action> [packages]
 
 Usually, [packages] is a list of import paths.
 
@@ -501,7 +501,7 @@ General-purpose environment variables:
 	GOMODCACHE
 		The directory where the go command will store downloaded modules.
 	GODEBUG
-		Enable various debugging facilities. See 'go doc runtime'
+		Enable various debugging facilities. See https://go.dev/doc/godebug
 		for details.
 	GOENV
 		The location of the Go environment configuration file.

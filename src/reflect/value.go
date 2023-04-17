@@ -2743,7 +2743,7 @@ func (v Value) UnsafePointer() unsafe.Pointer {
 // it references will not be garbage collected, so programs must keep
 // a separate, correctly typed pointer to the underlying data.
 //
-// In new code, use unsafe.String or unsafe.StringData instead.
+// Deprecated: Use unsafe.String or unsafe.StringData instead.
 type StringHeader struct {
 	Data uintptr
 	Len  int
@@ -2756,7 +2756,7 @@ type StringHeader struct {
 // it references will not be garbage collected, so programs must keep
 // a separate, correctly typed pointer to the underlying data.
 //
-// In new code, use unsafe.Slice or unsafe.SliceData instead.
+// Deprecated: Use unsafe.Slice or unsafe.SliceData instead.
 type SliceHeader struct {
 	Data uintptr
 	Len  int
@@ -3474,7 +3474,7 @@ func convertOp(dst, src *rtype) func(Value, Type) Value {
 		if dst.Kind() == Pointer && dst.Elem().Kind() == Array && src.Elem() == dst.Elem().Elem() {
 			return cvtSliceArrayPtr
 		}
-		// "x is a slice, T is a array type,
+		// "x is a slice, T is an array type,
 		// and the slice and array types have identical element types."
 		if dst.Kind() == Array && src.Elem() == dst.Elem() {
 			return cvtSliceArray
@@ -3831,12 +3831,6 @@ func memmove(dst, src unsafe.Pointer, size uintptr)
 //
 //go:noescape
 func typedmemmove(t *rtype, dst, src unsafe.Pointer)
-
-// typedmemmovepartial is like typedmemmove but assumes that
-// dst and src point off bytes into the value and only copies size bytes.
-//
-//go:noescape
-func typedmemmovepartial(t *rtype, dst, src unsafe.Pointer, off, size uintptr)
 
 // typedmemclr zeros the value at ptr of type t.
 //

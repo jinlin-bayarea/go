@@ -5,6 +5,7 @@
 package net
 
 import (
+	"context"
 	"errors"
 	"internal/poll"
 	"sync"
@@ -40,4 +41,36 @@ func initMPTCPavailable() {
 		// another error: MPTCP was not available but it might be later
 		mptcpAvailable = true
 	}
+}
+
+func (sd *sysDialer) dialMPTCP(ctx context.Context, laddr, raddr *TCPAddr) (*TCPConn, error) {
+	if supportsMultipathTCP() {
+		if conn, err := sd.doDialTCPProto(ctx, laddr, raddr, _IPPROTO_MPTCP); err == nil {
+			return conn, nil
+		}
+	}
+
+	// Fallback to dialTCP if Multipath TCP isn't supported on this operating
+	// system. But also fallback in case of any error with MPTCP.
+	//
+	// Possible MPTCP specific error: ENOPROTOOPT (sysctl net.mptcp.enabled=0)
+	// But just in case MPTCP is blocked differently (SELinux, etc.), just
+	// retry with "plain" TCP.
+	return sd.dialTCP(ctx, laddr, raddr)
+}
+
+func (sl *sysListener) listenMPTCP(ctx context.Context, laddr *TCPAddr) (*TCPListener, error) {
+	if supportsMultipathTCP() {
+		if dial, err := sl.listenTCPProto(ctx, laddr, _IPPROTO_MPTCP); err == nil {
+			return dial, nil
+		}
+	}
+
+	// Fallback to listenTCP if Multipath TCP isn't supported on this operating
+	// system. But also fallback in case of any error with MPTCP.
+	//
+	// Possible MPTCP specific error: ENOPROTOOPT (sysctl net.mptcp.enabled=0)
+	// But just in case MPTCP is blocked differently (SELinux, etc.), just
+	// retry with "plain" TCP.
+	return sl.listenTCP(ctx, laddr)
 }

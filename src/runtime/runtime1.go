@@ -325,6 +325,7 @@ var debug struct {
 	asyncpreemptoff    int32
 	harddecommit       int32
 	adaptivestackstart int32
+	tracefpunwindoff   int32
 
 	// debug.malloc is used as a combined debug check
 	// in the malloc function and should be set
@@ -359,6 +360,7 @@ var dbgvars = []*dbgVar{
 	{name: "inittrace", value: &debug.inittrace},
 	{name: "harddecommit", value: &debug.harddecommit},
 	{name: "adaptivestackstart", value: &debug.adaptivestackstart},
+	{name: "tracefpunwindoff", value: &debug.tracefpunwindoff},
 	{name: "panicnil", atomic: &debug.panicnil},
 }
 
@@ -511,6 +513,13 @@ func setTraceback(level string) {
 		t = 2<<tracebackShift | tracebackAll
 	case "crash":
 		t = 2<<tracebackShift | tracebackAll | tracebackCrash
+	case "wer":
+		if GOOS == "windows" {
+			t = 2<<tracebackShift | tracebackAll | tracebackCrash
+			enableWER()
+			break
+		}
+		fallthrough
 	default:
 		t = tracebackAll
 		if n, ok := atoi(level); ok && n == int(uint32(n)) {

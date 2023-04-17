@@ -235,7 +235,7 @@ func (check *Checker) builtin(x *operand, call *ast.CallExpr, id builtinId) (_ b
 
 	case _Clear:
 		// clear(m)
-		if !check.allowVersion(check.pkg, 1, 21) {
+		if !check.allowVersion(check.pkg, call.Pos(), 1, 21) {
 			check.error(call.Fun, UnsupportedFeature, "clear requires go1.21 or later")
 			return
 		}
@@ -627,7 +627,7 @@ func (check *Checker) builtin(x *operand, call *ast.CallExpr, id builtinId) (_ b
 
 	case _Add:
 		// unsafe.Add(ptr unsafe.Pointer, len IntegerType) unsafe.Pointer
-		if !check.allowVersion(check.pkg, 1, 17) {
+		if !check.allowVersion(check.pkg, call.Pos(), 1, 17) {
 			check.error(call.Fun, UnsupportedFeature, "unsafe.Add requires go1.17 or later")
 			return
 		}
@@ -679,7 +679,7 @@ func (check *Checker) builtin(x *operand, call *ast.CallExpr, id builtinId) (_ b
 			return
 		}
 
-		check.expr(x, selx.X)
+		check.expr(nil, x, selx.X)
 		if x.mode == invalid {
 			return
 		}
@@ -763,7 +763,7 @@ func (check *Checker) builtin(x *operand, call *ast.CallExpr, id builtinId) (_ b
 
 	case _Slice:
 		// unsafe.Slice(ptr *T, len IntegerType) []T
-		if !check.allowVersion(check.pkg, 1, 17) {
+		if !check.allowVersion(check.pkg, call.Pos(), 1, 17) {
 			check.error(call.Fun, UnsupportedFeature, "unsafe.Slice requires go1.17 or later")
 			return
 		}
@@ -788,7 +788,7 @@ func (check *Checker) builtin(x *operand, call *ast.CallExpr, id builtinId) (_ b
 
 	case _SliceData:
 		// unsafe.SliceData(slice []T) *T
-		if !check.allowVersion(check.pkg, 1, 20) {
+		if !check.allowVersion(check.pkg, call.Pos(), 1, 20) {
 			check.error(call.Fun, UnsupportedFeature, "unsafe.SliceData requires go1.20 or later")
 			return
 		}
@@ -807,7 +807,7 @@ func (check *Checker) builtin(x *operand, call *ast.CallExpr, id builtinId) (_ b
 
 	case _String:
 		// unsafe.String(ptr *byte, len IntegerType) string
-		if !check.allowVersion(check.pkg, 1, 20) {
+		if !check.allowVersion(check.pkg, call.Pos(), 1, 20) {
 			check.error(call.Fun, UnsupportedFeature, "unsafe.String requires go1.20 or later")
 			return
 		}
@@ -831,7 +831,7 @@ func (check *Checker) builtin(x *operand, call *ast.CallExpr, id builtinId) (_ b
 
 	case _StringData:
 		// unsafe.StringData(str string) *byte
-		if !check.allowVersion(check.pkg, 1, 20) {
+		if !check.allowVersion(check.pkg, call.Pos(), 1, 20) {
 			check.error(call.Fun, UnsupportedFeature, "unsafe.StringData requires go1.20 or later")
 			return
 		}
@@ -879,7 +879,7 @@ func (check *Checker) builtin(x *operand, call *ast.CallExpr, id builtinId) (_ b
 		var t operand
 		x1 := x
 		for _, arg := range call.Args {
-			check.rawExpr(x1, arg, nil, false) // permit trace for types, e.g.: new(trace(T))
+			check.rawExpr(nil, x1, arg, nil, false) // permit trace for types, e.g.: new(trace(T))
 			check.dump("%v: %s", x1.Pos(), x1)
 			x1 = &t // use incoming x only for first argument
 		}

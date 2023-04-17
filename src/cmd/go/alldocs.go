@@ -883,9 +883,9 @@
 //	    GOROOT        string   // Go root
 //	    GOPATH        string   // Go path
 //	    CgoEnabled    bool     // whether cgo can be used
-//	    UseAllFiles   bool     // use files regardless of +build lines, file names
+//	    UseAllFiles   bool     // use files regardless of //go:build lines, file names
 //	    Compiler      string   // compiler to assume when computing target paths
-//	    BuildTags     []string // build constraints to match in +build lines
+//	    BuildTags     []string // build constraints to match in //go:build lines
 //	    ToolTags      []string // toolchain-specific build constraints
 //	    ReleaseTags   []string // releases the current release is compatible with
 //	    InstallSuffix string   // suffix to use in the name of the install dir
@@ -2119,7 +2119,7 @@
 //	GOMODCACHE
 //		The directory where the go command will store downloaded modules.
 //	GODEBUG
-//		Enable various debugging facilities. See 'go doc runtime'
+//		Enable various debugging facilities. See https://go.dev/doc/godebug
 //		for details.
 //	GOENV
 //		The location of the Go environment configuration file.
@@ -2804,7 +2804,7 @@
 //
 // Many commands apply to a set of packages:
 //
-//	go action [packages]
+//	go <action> [packages]
 //
 // Usually, [packages] is a list of import paths.
 //

@@ -408,7 +408,7 @@ func (check *Checker) constDecl(obj *Const, typ, init syntax.Expr, inherited boo
 			// (see issues go.dev/issue/42991, go.dev/issue/42992).
 			check.errpos = obj.pos
 		}
-		check.expr(&x, init)
+		check.expr(nil, &x, init)
 	}
 	check.initConst(obj, &x)
 }
@@ -455,7 +455,7 @@ func (check *Checker) varDecl(obj *Var, lhs []*Var, typ, init syntax.Expr) {
 	if lhs == nil || len(lhs) == 1 {
 		assert(lhs == nil || lhs[0] == obj)
 		var x operand
-		check.expr(&x, init)
+		check.expr(obj.typ, &x, init)
 		check.initVar(obj, &x, "variable declaration")
 		return
 	}
@@ -506,7 +506,7 @@ func (check *Checker) typeDecl(obj *TypeName, tdecl *syntax.TypeDecl, def *Named
 			check.validType(t)
 		}
 		// If typ is local, an error was already reported where typ is specified/defined.
-		if check.isImportedConstraint(rhs) && !check.allowVersion(check.pkg, 1, 18) {
+		if check.isImportedConstraint(rhs) && !check.allowVersion(check.pkg, tdecl.Pos(), 1, 18) {
 			check.versionErrorf(tdecl.Type, "go1.18", "using type constraint %s", rhs)
 		}
 	}).describef(obj, "validType(%s)", obj.Name())
@@ -521,7 +521,7 @@ func (check *Checker) typeDecl(obj *TypeName, tdecl *syntax.TypeDecl, def *Named
 
 	// alias declaration
 	if alias {
-		if !check.allowVersion(check.pkg, 1, 9) {
+		if !check.allowVersion(check.pkg, tdecl.Pos(), 1, 9) {
 			check.versionErrorf(tdecl, "go1.9", "type aliases")
 		}
 

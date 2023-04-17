@@ -51,13 +51,6 @@ func (check *Checker) infer(posn positioner, tparams []*TypeParam, targs []Type,
 	}
 	// len(targs) < n
 
-	// Rename type parameters to avoid conflicts in recursive instantiation scenarios.
-	tparams, params = check.renameTParams(posn.Pos(), tparams, params)
-
-	if traceInference {
-		check.dump("-- rename: %s%s ➞ %s\n", tparams, params, targs)
-	}
-
 	// Make sure we have a "full" list of type arguments, some of which may
 	// be nil (unknown). Make a copy so as to not clobber the incoming slice.
 	if len(targs) < n {
@@ -336,19 +329,16 @@ func (check *Checker) infer(posn positioner, tparams []*TypeParam, targs []Type,
 	// Generally, cycles may occur across multiple type parameters and inferred types
 	// (for instance, consider [P interface{ *Q }, Q interface{ func(P) }]).
 	// We eliminate cycles by walking the graphs for all type parameters. If a cycle
-	// through a type parameter is detected, cycleFinder nils out the respective type
-	// which kills the cycle; this also means that the respective type could not be
-	// inferred.
+	// through a type parameter is detected, killCycles nils out the respective type
+	// (in the inferred list) which kills the cycle, and marks the corresponding type
+	// parameter as not inferred.
 	//
 	// TODO(gri) If useful, we could report the respective cycle as an error. We don't
 	//           do this now because type inference will fail anyway, and furthermore,
 	//           constraints with cycles of this kind cannot currently be satisfied by
 	//           any user-supplied type. But should that change, reporting an error
 	//           would be wrong.
-	w := cycleFinder{tparams, inferred, make(map[Type]bool)}
-	for _, t := range tparams {
-		w.typ(t) // t != nil
-	}
+	killCycles(tparams, inferred)
 
 	// dirty tracks the indices of all types that may still contain type parameters.
 	// We know that nil type entries and entries corresponding to provided (non-nil)
@@ -395,6 +385,7 @@ func (check *Checker) infer(posn positioner, tparams []*TypeParam, targs []Type,
 // renameTParams renames the type parameters in a function signature described by its
 // type and ordinary parameters (tparams and params) such that each type parameter is
 // given a new identity. renameTParams returns the new type and ordinary parameters.
+// The positions is only used for debug traces.
 func (check *Checker) renameTParams(pos token.Pos, tparams []*TypeParam, params *Tuple) ([]*TypeParam, *Tuple) {
 	// For the purpose of type inference we must differentiate type parameters
 	// occurring in explicit type or value function arguments from the type
@@ -406,7 +397,7 @@ func (check *Checker) renameTParams(pos token.Pos, tparams []*TypeParam, params 
 	//   }
 	//
 	// In this example, without type parameter renaming, the P used in the
-	// instantation f[P] has the same pointer identity as the P we are trying
+	// instantiation f[P] has the same pointer identity as the P we are trying
 	// to solve for through type inference. This causes problems for type
 	// unification. Because any such self-recursive call is equivalent to
 	// a mutually recursive call, type parameter renaming can be used to
@@ -423,6 +414,10 @@ func (check *Checker) renameTParams(pos token.Pos, tparams []*TypeParam, params 
 	//
 	// Type parameter renaming turns the first example into the second
 	// example by renaming the type parameter P into P2.
+	if len(tparams) == 0 {
+		return nil, params // nothing to do
+	}
+
 	tparams2 := make([]*TypeParam, len(tparams))
 	for i, tparam := range tparams {
 		tname := NewTypeName(tparam.Obj().Pos(), tparam.Obj().Pkg(), tparam.Obj().Name(), nil)
@@ -468,15 +463,15 @@ func typeParamsString(list []*TypeParam) string {
 // isParameterized reports whether typ contains any of the type parameters of tparams.
 func isParameterized(tparams []*TypeParam, typ Type) bool {
 	w := tpWalker{
-		seen:    make(map[Type]bool),
 		tparams: tparams,
+		seen:    make(map[Type]bool),
 	}
 	return w.isParameterized(typ)
 }
 
 type tpWalker struct {
-	seen    map[Type]bool
 	tparams []*TypeParam
+	seen    map[Type]bool
 }
 
 func (w *tpWalker) isParameterized(typ Type) (res bool) {
@@ -490,8 +485,8 @@ func (w *tpWalker) isParameterized(typ Type) (res bool) {
 	}()
 
 	switch t := typ.(type) {
-	case nil, *Basic: // TODO(gri) should nil be handled here?
-		break
+	case *Basic:
+		// nothing to do
 
 	case *Array:
 		return w.isParameterized(t.elem)
@@ -500,22 +495,14 @@ func (w *tpWalker) isParameterized(typ Type) (res bool) {
 		return w.isParameterized(t.elem)
 
 	case *Struct:
-		for _, fld := range t.fields {
-			if w.isParameterized(fld.typ) {
-				return true
-			}
-		}
+		return w.varList(t.fields)
 
 	case *Pointer:
 		return w.isParameterized(t.base)
 
-	case *Tuple:
-		n := t.Len()
-		for i := 0; i < n; i++ {
-			if w.isParameterized(t.At(i).typ) {
-				return true
-			}
-		}
+	// case *Tuple:
+	//      This case should not occur because tuples only appear
+	//      in signatures where they are handled explicitly.
 
 	case *Signature:
 		// t.tparams may not be nil if we are looking at a signature
@@ -525,7 +512,7 @@ func (w *tpWalker) isParameterized(typ Type) (res bool) {
 		// Similarly, the receiver of a method may declare (rather then
 		// use) type parameters, we don't care about those either.
 		// Thus, we only need to look at the input and result parameters.
-		return w.isParameterized(t.params) || w.isParameterized(t.results)
+		return t.params != nil && w.varList(t.params.vars) || t.results != nil && w.varList(t.results.vars)
 
 	case *Interface:
 		tset := t.typeSet()
@@ -545,22 +532,26 @@ func (w *tpWalker) isParameterized(typ Type) (res bool) {
 		return w.isParameterized(t.elem)
 
 	case *Named:
-		return w.isParameterizedTypeList(t.TypeArgs().list())
+		for _, t := range t.TypeArgs().list() {
+			if w.isParameterized(t) {
+				return true
+			}
+		}
 
 	case *TypeParam:
 		// t must be one of w.tparams
 		return tparamIndex(w.tparams, t) >= 0
 
 	default:
-		unreachable()
+		panic(fmt.Sprintf("unexpected %T", typ))
 	}
 
 	return false
 }
 
-func (w *tpWalker) isParameterizedTypeList(list []Type) bool {
-	for _, t := range list {
-		if w.isParameterized(t) {
+func (w *tpWalker) varList(list []*Var) bool {
+	for _, v := range list {
+		if w.isParameterized(v.typ) {
 			return true
 		}
 	}
@@ -603,21 +594,35 @@ func coreTerm(tpar *TypeParam) (*term, bool) {
 	return nil, false
 }
 
+// killCycles walks through the given type parameters and looks for cycles
+// created by type parameters whose inferred types refer back to that type
+// parameter, either directly or indirectly. If such a cycle is detected,
+// it is killed by setting the corresponding inferred type to nil.
+//
+// TODO(gri) Determine if we can simply abort inference as soon as we have
+// found a single cycle.
+func killCycles(tparams []*TypeParam, inferred []Type) {
+	w := cycleFinder{tparams, inferred, make(map[Type]bool)}
+	for _, t := range tparams {
+		w.typ(t) // t != nil
+	}
+}
+
 type cycleFinder struct {
-	tparams []*TypeParam
-	types   []Type
-	seen    map[Type]bool
+	tparams  []*TypeParam
+	inferred []Type
+	seen     map[Type]bool
 }
 
 func (w *cycleFinder) typ(typ Type) {
 	if w.seen[typ] {
 		// We have seen typ before. If it is one of the type parameters
-		// in tparams, iterative substitution will lead to infinite expansion.
+		// in w.tparams, iterative substitution will lead to infinite expansion.
 		// Nil out the corresponding type which effectively kills the cycle.
 		if tpar, _ := typ.(*TypeParam); tpar != nil {
 			if i := tparamIndex(w.tparams, tpar); i >= 0 {
 				// cycle through tpar
-				w.types[i] = nil
+				w.inferred[i] = nil
 			}
 		}
 		// If we don't have one of our type parameters, the cycle is due
@@ -681,8 +686,8 @@ func (w *cycleFinder) typ(typ Type) {
 		}
 
 	case *TypeParam:
-		if i := tparamIndex(w.tparams, t); i >= 0 && w.types[i] != nil {
-			w.typ(w.types[i])
+		if i := tparamIndex(w.tparams, t); i >= 0 && w.inferred[i] != nil {
+			w.typ(w.inferred[i])
 		}
 
 	default:
@@ -696,17 +701,13 @@ func (w *cycleFinder) varList(list []*Var) {
 	}
 }
 
-// If tpar is a type parameter in list, tparamIndex returns the type parameter index.
-// Otherwise, the result is < 0. tpar must not be nil.
+// If tpar is a type parameter in list, tparamIndex returns the index
+// of the type parameter in list. Otherwise the result is < 0.
 func tparamIndex(list []*TypeParam, tpar *TypeParam) int {
-	// Once a type parameter is bound its index is >= 0. However, there are some
-	// code paths (namely tracing and type hashing) by which it is possible to
-	// arrive here with a type parameter that has not been bound, hence the check
-	// for 0 <= i below.
-	// TODO(rfindley): investigate a better approach for guarding against using
-	// unbound type parameters.
-	if i := tpar.index; 0 <= i && i < len(list) && list[i] == tpar {
-		return i
+	for i, p := range list {
+		if p == tpar {
+			return i
+		}
 	}
 	return -1
 }

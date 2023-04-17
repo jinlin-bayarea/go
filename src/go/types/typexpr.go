@@ -43,7 +43,7 @@ func (check *Checker) ident(x *operand, e *ast.Ident, def *Named, wantType bool)
 		}
 		return
 	case universeAny, universeComparable:
-		if !check.allowVersion(check.pkg, 1, 18) {
+		if !check.allowVersion(check.pkg, e.Pos(), 1, 18) {
 			check.versionErrorf(e, "go1.18", "predeclared %s", e.Name)
 			return // avoid follow-on errors
 		}
@@ -273,7 +273,7 @@ func (check *Checker) typInternal(e0 ast.Expr, def *Named) (T Type) {
 
 	case *ast.IndexExpr, *ast.IndexListExpr:
 		ix := typeparams.UnpackIndexExpr(e)
-		if !check.allowVersion(check.pkg, 1, 18) {
+		if !check.allowVersion(check.pkg, e.Pos(), 1, 18) {
 			check.softErrorf(inNode(e, ix.Lbrack), UnsupportedFeature, "type instantiation requires go1.18 or later")
 		}
 		return check.instantiatedType(ix, def)
@@ -480,7 +480,7 @@ func (check *Checker) arrayLength(e ast.Expr) int64 {
 	}
 
 	var x operand
-	check.expr(&x, e)
+	check.expr(nil, &x, e)
 	if x.mode != constant_ {
 		if x.mode != invalid {
 			check.errorf(&x, InvalidArrayLen, "array length %s must be constant", &x)

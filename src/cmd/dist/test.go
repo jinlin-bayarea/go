@@ -675,7 +675,7 @@ func (t *tester) registerTests() {
 	}
 
 	// Runtime CPU tests.
-	if !t.compileOnly && goos != "js" { // js can't handle -cpu != 1
+	if !t.compileOnly && t.hasParallelism() {
 		t.registerTest("runtime:cpu124", "GOMAXPROCS=2 runtime -cpu=1,2,4 -quick",
 			&goTest{
 				timeout:   300 * time.Second,
@@ -737,9 +737,9 @@ func (t *tester) registerTests() {
 	// On the builders only, test that a moved GOROOT still works.
 	// Fails on iOS because CC_FOR_TARGET refers to clangwrap.sh
 	// in the unmoved GOROOT.
-	// Fails on Android and js/wasm with an exec format error.
+	// Fails on Android, js/wasm and wasip1/wasm with an exec format error.
 	// Fails on plan9 with "cannot find GOROOT" (issue #21016).
-	if os.Getenv("GO_BUILDER_NAME") != "" && goos != "android" && !t.iOS() && goos != "plan9" && goos != "js" {
+	if os.Getenv("GO_BUILDER_NAME") != "" && goos != "android" && !t.iOS() && goos != "plan9" && goos != "js" && goos != "wasip1" {
 		t.tests = append(t.tests, distTest{
 			name:    "moved_goroot",
 			heading: "moved GOROOT",
@@ -835,7 +835,7 @@ func (t *tester) registerTests() {
 	}
 
 	// sync tests
-	if goos != "js" { // js doesn't support -cpu=10
+	if t.hasParallelism() {
 		t.registerTest("sync_cpu", "sync -cpu=10",
 			&goTest{
 				timeout: 120 * time.Second,
@@ -1266,6 +1266,17 @@ func (t *tester) registerCgoTests() {
 				}
 			}
 
+			// Doing a static link with boringcrypto gets
+			// a C linker warning on Linux.
+			// in function `bio_ip_and_port_to_socket_and_addr':
+			// warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+			if staticCheck.pre == nil && goos == "linux" && strings.Contains(goexperiment, "boringcrypto") {
+				staticCheck.pre = func(*distTest) bool {
+					fmt.Println("skipping static linking check on Linux when using boringcrypto to avoid C linker warning about getaddrinfo")
+					return false
+				}
+			}
+
 			// Static linking tests
 			if goos != "android" && p != "netbsd/arm" {
 				// TODO(#56629): Why does this fail on netbsd-arm?
@@ -1462,6 +1473,17 @@ func (t *tester) hasSwig() bool {
 		}
 	}
 
+	return true
+}
+
+// hasParallelism is a copy of the function
+// internal/testenv.HasParallelism, which can't be used here
+// because cmd/dist can not import internal packages during bootstrap.
+func (t *tester) hasParallelism() bool {
+	switch goos {
+	case "js", "wasip1":
+		return false
+	}
 	return true
 }
 
@@ -1694,7 +1716,7 @@ func buildModeSupported(compiler, buildmode, goos, goarch string) bool {
 
 	case "c-shared":
 		switch platform {
-		case "linux/amd64", "linux/arm", "linux/arm64", "linux/386", "linux/ppc64le", "linux/riscv64", "linux/s390x",
+		case "linux/amd64", "linux/arm", "linux/arm64", "linux/loong64", "linux/386", "linux/ppc64le", "linux/riscv64", "linux/s390x",
 			"android/amd64", "android/arm", "android/arm64", "android/386",
 			"freebsd/amd64",
 			"darwin/amd64", "darwin/arm64",
@@ -1711,7 +1733,7 @@ func buildModeSupported(compiler, buildmode, goos, goarch string) bool {
 
 	case "pie":
 		switch platform {
-		case "linux/386", "linux/amd64", "linux/arm", "linux/arm64", "linux/ppc64le", "linux/riscv64", "linux/s390x",
+		case "linux/386", "linux/amd64", "linux/arm", "linux/arm64", "linux/loong64", "linux/ppc64le", "linux/riscv64", "linux/s390x",
 			"android/amd64", "android/arm", "android/arm64", "android/386",
 			"freebsd/amd64",
 			"darwin/amd64", "darwin/arm64",

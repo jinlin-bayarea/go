@@ -179,6 +179,11 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	IDs will refer to the ID of the goroutine at the time of creation; it's possible for this
 	ID to be reused for another goroutine. Setting N to 0 will report no ancestry information.
 
+	tracefpunwindoff: setting tracefpunwindoff=1 forces the execution tracer to
+	use the runtime's default stack unwinder instead of frame pointer unwinding.
+	This increases tracer overhead, but could be helpful as a workaround or for
+	debugging unexpected regressions caused by frame pointer unwinding.
+
 	asyncpreemptoff: asyncpreemptoff=1 disables signal-based
 	asynchronous goroutine preemption. This makes some loops
 	non-preemptible for long periods, which may delay GC and
@@ -212,6 +217,7 @@ and shows goroutines created internally by the run-time.
 GOTRACEBACK=crash is like “system” but crashes in an operating system-specific
 manner instead of exiting. For example, on Unix systems, the crash raises
 SIGABRT to trigger a core dump.
+GOTRACEBACK=wer is like “crash” but doesn't disable Windows Error Reporting (WER).
 For historical reasons, the GOTRACEBACK settings 0, 1, and 2 are synonyms for
 none, all, and system, respectively.
 The runtime/debug package's SetTraceback function allows increasing the

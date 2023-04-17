@@ -310,6 +310,11 @@ const (
 	// instruction, by encoding the address into the instruction.
 	R_CALLLOONG64
 
+	// R_LOONG64_TLS_IE_PCREL_HI and R_LOONG64_TLS_IE_LO relocates a pcalau12i, ld.d
+	// pair to compute the address of the GOT slot of the tls symbol.
+	R_LOONG64_TLS_IE_PCREL_HI
+	R_LOONG64_TLS_IE_LO
+
 	// R_JMPLOONG64 resolves to non-PC-relative target address of a JMP instruction,
 	// by encoding the address into the instruction.
 	R_JMPLOONG64
@@ -336,6 +341,12 @@ const (
 	// R_PEIMAGEOFF resolves to a 32-bit offset from the start address of where
 	// the executable file is mapped in memory.
 	R_PEIMAGEOFF
+
+	// R_INITORDER specifies an ordering edge between two inittask records.
+	// (From one p..inittask record to another one.)
+	// This relocation does not apply any changes to the actual data, it is
+	// just used in the linker to order the inittask records appropriately.
+	R_INITORDER
 
 	// R_WEAK marks the relocation as a weak reference.
 	// A weak relocation does not make the symbol it refers to reachable,

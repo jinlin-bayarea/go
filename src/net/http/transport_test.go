@@ -741,7 +741,7 @@ func testTransportRemovesDeadIdleConnections(t *testing.T, mode testMode) {
 	c := ts.Client()
 	tr := c.Transport.(*Transport)
 
-	doReq := func(name string) string {
+	doReq := func(name string) {
 		// Do a POST instead of a GET to prevent the Transport's
 		// idempotent request retry logic from kicking in...
 		res, err := c.Post(ts.URL, "", nil)
@@ -756,10 +756,10 @@ func testTransportRemovesDeadIdleConnections(t *testing.T, mode testMode) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		return string(slurp)
+		t.Logf("%s: ok (%q)", name, slurp)
 	}
 
-	first := doReq("first")
+	doReq("first")
 	keys1 := tr.IdleConnKeysForTesting()
 
 	ts.CloseClientConnections()
@@ -776,10 +776,7 @@ func testTransportRemovesDeadIdleConnections(t *testing.T, mode testMode) {
 		return true
 	})
 
-	second := doReq("second")
-	if first == second {
-		t.Errorf("expected a different connection between requests. got %q both times", first)
-	}
+	doReq("second")
 }
 
 // Test that the Transport notices when a server hangs up on its
@@ -3405,9 +3402,13 @@ func (c byteFromChanReader) Read(p []byte) (n int, err error) {
 // questionable state.
 // golang.org/issue/7569
 func TestTransportNoReuseAfterEarlyResponse(t *testing.T) {
-	run(t, testTransportNoReuseAfterEarlyResponse, []testMode{http1Mode})
+	run(t, testTransportNoReuseAfterEarlyResponse, []testMode{http1Mode}, testNotParallel)
 }
 func testTransportNoReuseAfterEarlyResponse(t *testing.T, mode testMode) {
+	defer func(d time.Duration) {
+		*MaxWriteWaitBeforeConnReuse = d
+	}(*MaxWriteWaitBeforeConnReuse)
+	*MaxWriteWaitBeforeConnReuse = 10 * time.Millisecond
 	var sconn struct {
 		sync.Mutex
 		c net.Conn
@@ -3634,13 +3635,13 @@ func testRetryRequestsOnError(t *testing.T, mode testMode) {
 				req := tc.req()
 				res, err := c.Do(req)
 				if err != nil {
-					if time.Since(t0) < MaxWriteWaitBeforeConnReuse/2 {
+					if time.Since(t0) < *MaxWriteWaitBeforeConnReuse/2 {
 						mu.Lock()
 						got := logbuf.String()
 						mu.Unlock()
 						t.Fatalf("i=%d: Do = %v; log:\n%s", i, err, got)
 					}
-					t.Skipf("connection likely wasn't recycled within %d, interfering with actual test; skipping", MaxWriteWaitBeforeConnReuse)
+					t.Skipf("connection likely wasn't recycled within %d, interfering with actual test; skipping", *MaxWriteWaitBeforeConnReuse)
 				}
 				res.Body.Close()
 				if res.Request != req {
@@ -4249,6 +4250,21 @@ func testTransportFlushesRequestHeader(t *testing.T, mode testMode) {
 	<-gotRes
 }
 
+type wgReadCloser struct {
+	io.Reader
+	wg     *sync.WaitGroup
+	closed bool
+}
+
+func (c *wgReadCloser) Close() error {
+	if c.closed {
+		return net.ErrClosed
+	}
+	c.closed = true
+	c.wg.Done()
+	return nil
+}
+
 // Issue 11745.
 func TestTransportPrefersResponseOverWriteError(t *testing.T) {
 	run(t, testTransportPrefersResponseOverWriteError)
@@ -4270,12 +4286,29 @@ func testTransportPrefersResponseOverWriteError(t *testing.T, mode testMode) {
 
 	fail := 0
 	count := 100
+
 	bigBody := strings.Repeat("a", contentLengthLimit*2)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	getBody := func() (io.ReadCloser, error) {
+		wg.Add(1)
+		body := &wgReadCloser{
+			Reader: strings.NewReader(bigBody),
+			wg:     &wg,
+		}
+		return body, nil
+	}
+
 	for i := 0; i < count; i++ {
-		req, err := NewRequest("PUT", ts.URL, strings.NewReader(bigBody))
+		reqBody, _ := getBody()
+		req, err := NewRequest("PUT", ts.URL, reqBody)
 		if err != nil {
+			reqBody.Close()
 			t.Fatal(err)
 		}
+		req.ContentLength = int64(len(bigBody))
+		req.GetBody = getBody
+
 		resp, err := c.Do(req)
 		if err != nil {
 			fail++
