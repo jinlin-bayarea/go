@@ -13,6 +13,12 @@ import (
 	"unsafe"
 )
 
+func TestKindString(t *testing.T) {
+	if got, want := KindGroup.String(), "Group"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 func TestValueEqual(t *testing.T) {
 	var x, y int
 	vals := []Value{
@@ -55,6 +61,7 @@ func TestValueString(t *testing.T) {
 		want string
 	}{
 		{Int64Value(-3), "-3"},
+		{Uint64Value(1), "1"},
 		{Float64Value(.15), "0.15"},
 		{BoolValue(true), "true"},
 		{StringValue("foo"), "foo"},
@@ -118,13 +125,23 @@ func TestAnyValue(t *testing.T) {
 	}{
 		{1, IntValue(1)},
 		{1.5, Float64Value(1.5)},
+		{float32(2.5), Float64Value(2.5)},
 		{"s", StringValue("s")},
-		{uint(2), Uint64Value(2)},
 		{true, BoolValue(true)},
 		{testTime, TimeValue(testTime)},
 		{time.Hour, DurationValue(time.Hour)},
 		{[]Attr{Int("i", 3)}, GroupValue(Int("i", 3))},
 		{IntValue(4), IntValue(4)},
+		{uint(2), Uint64Value(2)},
+		{uint8(3), Uint64Value(3)},
+		{uint16(4), Uint64Value(4)},
+		{uint32(5), Uint64Value(5)},
+		{uint64(6), Uint64Value(6)},
+		{uintptr(7), Uint64Value(7)},
+		{int8(8), Int64Value(8)},
+		{int16(9), Int64Value(9)},
+		{int32(10), Int64Value(10)},
+		{int64(11), Int64Value(11)},
 	} {
 		got := AnyValue(test.in)
 		if !got.Equal(test.want) {
@@ -141,6 +158,12 @@ func TestValueAny(t *testing.T) {
 		time.UTC, // time.Locations treated specially...
 		KindBool, // ...as are Kinds
 		[]Attr{Int("a", 1)},
+		int64(2),
+		uint64(3),
+		true,
+		time.Minute,
+		time.Time{},
+		3.14,
 	} {
 		v := AnyValue(want)
 		got := v.Any()
@@ -175,14 +198,11 @@ func TestLogValue(t *testing.T) {
 		t.Errorf("expected error, got %T", got)
 	}
 
-	// Test Resolve group.
-	r = &replace{GroupValue(
-		Int("a", 1),
-		Group("b", Any("c", &replace{StringValue("d")})),
-	)}
-	v = AnyValue(r)
+	// Groups are not recursively resolved.
+	c := Any("c", &replace{StringValue("d")})
+	v = AnyValue(&replace{GroupValue(Int("a", 1), Group("b", c))})
 	got2 := v.Resolve().Any().([]Attr)
-	want2 := []Attr{Int("a", 1), Group("b", String("c", "d"))}
+	want2 := []Attr{Int("a", 1), Group("b", c)}
 	if !attrsEqual(got2, want2) {
 		t.Errorf("got %v, want %v", got2, want2)
 	}
@@ -196,7 +216,6 @@ func TestLogValue(t *testing.T) {
 	}
 	// The error should provide some context information.
 	// We'll just check that this function name appears in it.
-	fmt.Println(got)
 	if got, want := gotErr.Error(), "TestLogValue"; !strings.Contains(got, want) {
 		t.Errorf("got %q, want substring %q", got, want)
 	}

@@ -200,11 +200,6 @@ type mOS struct {
 	preemptExtLock uint32
 }
 
-//go:linkname os_sigpipe os.sigpipe
-func os_sigpipe() {
-	throw("too many writes on closed pipe")
-}
-
 // Stubs so tests can link correctly. These should never be called.
 func open(name *byte, mode, perm int32) int32 {
 	throw("unimplemented")
@@ -993,7 +988,7 @@ func minit() {
 		throw("bad g0 stack")
 	}
 	g0.stack.lo = base
-	g0.stackguard0 = g0.stack.lo + _StackGuard
+	g0.stackguard0 = g0.stack.lo + stackGuard
 	g0.stackguard1 = g0.stackguard0
 	// Sanity check the SP.
 	stackcheck()

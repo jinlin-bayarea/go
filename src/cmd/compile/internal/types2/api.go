@@ -112,7 +112,7 @@ type Config struct {
 
 	// GoVersion describes the accepted Go language version. The string
 	// must follow the format "go%d.%d" (e.g. "go1.12") or ist must be
-	// empty; an empty string indicates the latest language version.
+	// empty; an empty string disables Go language version checks.
 	// If the format is invalid, invoking the type checker will cause a
 	// panic.
 	GoVersion string
@@ -170,12 +170,11 @@ type Config struct {
 	// for unused imports.
 	DisableUnusedImportCheck bool
 
-	// If EnableReverseTypeInference is set, uninstantiated and
-	// partially instantiated generic functions may be assigned
-	// (incl. returned) to variables of function type and type
-	// inference will attempt to infer the missing type arguments.
-	// Experimental. Needs a proposal.
-	EnableReverseTypeInference bool
+	// If a non-empty ErrorURL format string is provided, it is used
+	// to format an error URL link that is appended to the first line
+	// of an error message. ErrorURL must be a format string containing
+	// exactly one "%s" format, e.g. "[go.dev/e/%s]".
+	ErrorURL string
 }
 
 func srcimporter_setUsesCgo(conf *Config) {

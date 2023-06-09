@@ -614,31 +614,6 @@ func mustLinkExternal(goos, goarch string, cgoEnabled bool) bool {
 	return false
 }
 
-// deptab lists changes to the default dependencies for a given prefix.
-// deps ending in /* read the whole directory; deps beginning with -
-// exclude files with that prefix.
-// Note that this table applies only to the build of cmd/go,
-// after the main compiler bootstrap.
-// Files listed here should also be listed in ../distpack/pack.go's srcArch.Remove list.
-var deptab = []struct {
-	prefix string   // prefix of target
-	dep    []string // dependency tweaks for targets with that prefix
-}{
-	{"cmd/go/internal/cfg", []string{
-		"zdefaultcc.go",
-		"zosarch.go",
-	}},
-	{"runtime/internal/sys", []string{
-		"zversion.go",
-	}},
-	{"go/build", []string{
-		"zcgo.go",
-	}},
-	{"time/tzdata", []string{
-		"zzipdata.go",
-	}},
-}
-
 // depsuffix records the allowed suffixes for source files.
 var depsuffix = []string{
 	".s",
@@ -646,22 +621,17 @@ var depsuffix = []string{
 }
 
 // gentab records how to generate some trivial files.
+// Files listed here should also be listed in ../distpack/pack.go's srcArch.Remove list.
 var gentab = []struct {
-	nameprefix string
-	gen        func(string, string)
+	pkg  string // Relative to $GOROOT/src
+	file string
+	gen  func(dir, file string)
 }{
-	{"zdefaultcc.go", mkzdefaultcc},
-	{"zosarch.go", mkzosarch},
-	{"zversion.go", mkzversion},
-	{"zcgo.go", mkzcgo},
-	{"zzipdata.go", mktzdata},
-
-	// not generated anymore, but delete the file if we see it
-	{"enam.c", nil},
-	{"anames5.c", nil},
-	{"anames6.c", nil},
-	{"anames8.c", nil},
-	{"anames9.c", nil},
+	{"go/build", "zcgo.go", mkzcgo},
+	{"cmd/go/internal/cfg", "zdefaultcc.go", mkzdefaultcc},
+	{"internal/platform", "zosarch.go", mkzosarch},
+	{"runtime/internal/sys", "zversion.go", mkzversion},
+	{"time/tzdata", "zzipdata.go", mktzdata},
 }
 
 // installed maps from a dir name (as given to install) to a chan
@@ -685,7 +655,7 @@ func startInstall(dir string) chan struct{} {
 	return ch
 }
 
-// runInstall installs the library, package, or binary associated with dir,
+// runInstall installs the library, package, or binary associated with pkg,
 // which is relative to $GOROOT/src.
 func runInstall(pkg string, ch chan struct{}) {
 	if pkg == "net" || pkg == "os/user" || pkg == "crypto/x509" {
@@ -772,12 +742,10 @@ func runInstall(pkg string, ch chan struct{}) {
 		return !strings.HasPrefix(p, ".") && (!strings.HasPrefix(p, "_") || !strings.HasSuffix(p, ".go"))
 	})
 
-	for _, dt := range deptab {
-		if pkg == dt.prefix || strings.HasSuffix(dt.prefix, "/") && strings.HasPrefix(pkg, dt.prefix) {
-			for _, p := range dt.dep {
-				p = os.ExpandEnv(p)
-				files = append(files, p)
-			}
+	// Add generated files for this package.
+	for _, gt := range gentab {
+		if gt.pkg == pkg {
+			files = append(files, gt.file)
 		}
 	}
 	files = uniq(files)
@@ -790,7 +758,7 @@ func runInstall(pkg string, ch chan struct{}) {
 	}
 
 	// Is the target up-to-date?
-	var gofiles, sfiles, missing []string
+	var gofiles, sfiles []string
 	stale := rebuildall
 	files = filter(files, func(p string) bool {
 		for _, suf := range depsuffix {
@@ -811,9 +779,6 @@ func runInstall(pkg string, ch chan struct{}) {
 		}
 		if t.After(ttarg) {
 			stale = true
-		}
-		if t.IsZero() {
-			missing = append(missing, p)
 		}
 		return true
 	})
@@ -842,32 +807,22 @@ func runInstall(pkg string, ch chan struct{}) {
 	}
 
 	// Generate any missing files; regenerate existing ones.
-	for _, p := range files {
-		elem := filepath.Base(p)
-		for _, gt := range gentab {
-			if gt.gen == nil {
-				continue
-			}
-			if strings.HasPrefix(elem, gt.nameprefix) {
-				if vflag > 1 {
-					errprintf("generate %s\n", p)
-				}
-				gt.gen(dir, p)
-				// Do not add generated file to clean list.
-				// In runtime, we want to be able to
-				// build the package with the go tool,
-				// and it assumes these generated files already
-				// exist (it does not know how to build them).
-				// The 'clean' command can remove
-				// the generated files.
-				goto built
-			}
+	for _, gt := range gentab {
+		if gt.pkg != pkg {
+			continue
 		}
-		// Did not rebuild p.
-		if find(p, missing) >= 0 {
-			fatalf("missing file %s", p)
+		p := pathf("%s/%s", dir, gt.file)
+		if vflag > 1 {
+			errprintf("generate %s\n", p)
 		}
-	built:
+		gt.gen(dir, p)
+		// Do not add generated file to clean list.
+		// In runtime, we want to be able to
+		// build the package with the go tool,
+		// and it assumes these generated files already
+		// exist (it does not know how to build them).
+		// The 'clean' command can remove
+		// the generated files.
 	}
 
 	// Resolve imported packages to actual package paths.
@@ -1191,29 +1146,11 @@ var runtimegen = []string{
 	"zversion.go",
 }
 
-// cleanlist is a list of packages with generated files and commands.
-var cleanlist = []string{
-	"runtime/internal/sys",
-	"cmd/cgo",
-	"cmd/go/internal/cfg",
-	"go/build",
-}
-
 func clean() {
-	for _, name := range cleanlist {
-		path := pathf("%s/src/%s", goroot, name)
-		// Remove generated files.
-		for _, elem := range xreaddir(path) {
-			for _, gt := range gentab {
-				if strings.HasPrefix(elem, gt.nameprefix) {
-					xremove(pathf("%s/%s", path, elem))
-				}
-			}
-		}
-		// Remove generated binary named for directory.
-		if strings.HasPrefix(name, "cmd/") {
-			xremove(pathf("%s/%s", path, name[4:]))
-		}
+	// Remove generated files.
+	for _, gt := range gentab {
+		path := pathf("%s/src/%s/%s", goroot, gt.pkg, gt.file)
+		xremove(path)
 	}
 
 	// remove runtimegen files.
@@ -1252,7 +1189,7 @@ func cmdenv() {
 	windows := flag.Bool("w", gohostos == "windows", "emit windows syntax")
 	xflagparse(0)
 
-	format := "%s=\"%s\"\n"
+	format := "%s=\"%s\";\n" // Include ; to separate variables when 'dist env' output is used with eval.
 	switch {
 	case *plan9:
 		format = "%s='%s'\n"
@@ -1299,6 +1236,17 @@ func cmdenv() {
 			sep = ";"
 		}
 		xprintf(format, "PATH", fmt.Sprintf("%s%s%s", gorootBin, sep, os.Getenv("PATH")))
+
+		// Also include $DIST_UNMODIFIED_PATH with the original $PATH
+		// for the internal needs of "dist banner", along with export
+		// so that it reaches the dist process. See its comment below.
+		var exportFormat string
+		if !*windows && !*plan9 {
+			exportFormat = "export " + format
+		} else {
+			exportFormat = format
+		}
+		xprintf(exportFormat, "DIST_UNMODIFIED_PATH", os.Getenv("PATH"))
 	}
 }
 
@@ -1509,7 +1457,8 @@ func cmdbootstrap() {
 	os.Setenv("CC", compilerEnvLookup("CC", defaultcc, goos, goarch))
 	// Now that cmd/go is in charge of the build process, enable GOEXPERIMENT.
 	os.Setenv("GOEXPERIMENT", goexperiment)
-	goInstall(toolenv(), goBootstrap, toolchain...)
+	// No need to enable PGO for toolchain2.
+	goInstall(toolenv(), goBootstrap, append([]string{"-pgo=off"}, toolchain...)...)
 	if debug {
 		run("", ShowOutput|CheckExit, pathf("%s/compile", tooldir), "-V=full")
 		copyfile(pathf("%s/compile2", tooldir), pathf("%s/compile", tooldir), writeExec)
@@ -1647,7 +1596,7 @@ func wrapperPathFor(goos, goarch string) string {
 	switch {
 	case goos == "android":
 		if gohostos != "android" {
-			return pathf("%s/misc/android/go_android_exec.go", goroot)
+			return pathf("%s/misc/go_android_exec/main.go", goroot)
 		}
 	case goos == "ios":
 		if gohostos != "ios" {
@@ -1897,7 +1846,15 @@ func banner() {
 		if gohostos == "windows" {
 			pathsep = ";"
 		}
-		if !strings.Contains(pathsep+os.Getenv("PATH")+pathsep, pathsep+gorootBin+pathsep) {
+		path := os.Getenv("PATH")
+		if p, ok := os.LookupEnv("DIST_UNMODIFIED_PATH"); ok {
+			// Scripts that modify $PATH and then run dist should also provide
+			// dist with an unmodified copy of $PATH via $DIST_UNMODIFIED_PATH.
+			// Use it here when determining if the user still needs to update
+			// their $PATH. See go.dev/issue/42563.
+			path = p
+		}
+		if !strings.Contains(pathsep+path+pathsep, pathsep+gorootBin+pathsep) {
 			xprintf("*** You need to add %s to your PATH.\n", gorootBin)
 		}
 	}

@@ -15,6 +15,7 @@ import (
 	"cmd/internal/sys"
 	"encoding/binary"
 	"fmt"
+	"internal/abi"
 	"io"
 	"log"
 	"os"
@@ -614,6 +615,10 @@ func (w *writer) Aux(s *LSym) {
 			}
 			w.aux1(goobj.AuxWasmImport, fn.WasmImportSym)
 		}
+	} else if v := s.VarInfo(); v != nil {
+		if v.dwarfInfoSym != nil && v.dwarfInfoSym.Size != 0 {
+			w.aux1(goobj.AuxDwarfInfo, v.dwarfInfoSym)
+		}
 	}
 }
 
@@ -720,6 +725,10 @@ func nAuxSym(s *LSym) int {
 			}
 			n++
 		}
+	} else if v := s.VarInfo(); v != nil {
+		if v.dwarfInfoSym != nil && v.dwarfInfoSym.Size != 0 {
+			n++
+		}
 	}
 	return n
 }
@@ -794,11 +803,14 @@ func genFuncInfoSyms(ctxt *Link) {
 func writeAuxSymDebug(ctxt *Link, par *LSym, aux *LSym) {
 	// Most aux symbols (ex: funcdata) are not interesting--
 	// pick out just the DWARF ones for now.
-	if aux.Type != objabi.SDWARFLOC &&
-		aux.Type != objabi.SDWARFFCN &&
-		aux.Type != objabi.SDWARFABSFCN &&
-		aux.Type != objabi.SDWARFLINES &&
-		aux.Type != objabi.SDWARFRANGE {
+	switch aux.Type {
+	case objabi.SDWARFLOC,
+		objabi.SDWARFFCN,
+		objabi.SDWARFABSFCN,
+		objabi.SDWARFLINES,
+		objabi.SDWARFRANGE,
+		objabi.SDWARFVAR:
+	default:
 		return
 	}
 	ctxt.writeSymDebugNamed(aux, "aux for "+par.Name)
@@ -841,10 +853,10 @@ func (ctxt *Link) writeSymDebugNamed(s *LSym, name string) {
 	if s.NoSplit() {
 		fmt.Fprintf(ctxt.Bso, "nosplit ")
 	}
-	if s.Func() != nil && s.Func().FuncFlag&objabi.FuncFlag_TOPFRAME != 0 {
+	if s.Func() != nil && s.Func().FuncFlag&abi.FuncFlagTopFrame != 0 {
 		fmt.Fprintf(ctxt.Bso, "topframe ")
 	}
-	if s.Func() != nil && s.Func().FuncFlag&objabi.FuncFlag_ASM != 0 {
+	if s.Func() != nil && s.Func().FuncFlag&abi.FuncFlagAsm != 0 {
 		fmt.Fprintf(ctxt.Bso, "asm ")
 	}
 	fmt.Fprintf(ctxt.Bso, "size=%d", s.Size)
