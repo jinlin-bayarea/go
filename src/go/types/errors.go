@@ -11,13 +11,21 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	. "internal/types/errors"
+	"runtime"
 	"strconv"
 	"strings"
 )
 
 func assert(p bool) {
 	if !p {
-		panic("assertion failed")
+		msg := "assertion failed"
+		// Include information about the assertion location. Due to panic recovery,
+		// this location is otherwise buried in the middle of the panicking stack.
+		if _, file, line, ok := runtime.Caller(1); ok {
+			msg = fmt.Sprintf("%s:%d: %s", file, line, msg)
+		}
+		panic(msg)
 	}
 }
 
@@ -29,7 +37,7 @@ func unreachable() {
 // To report an error_, call Checker.report.
 type error_ struct {
 	desc []errorDesc
-	code errorCode
+	code Code
 	soft bool // TODO(gri) eventually determine this from an error code
 }
 
@@ -46,7 +54,7 @@ func (err *error_) empty() bool {
 
 func (err *error_) pos() token.Pos {
 	if err.empty() {
-		return token.NoPos
+		return nopos
 	}
 	return err.desc[0].posn.Pos()
 }
@@ -55,7 +63,7 @@ func (err *error_) msg(fset *token.FileSet, qf Qualifier) string {
 	if err.empty() {
 		return "no error"
 	}
-	var buf bytes.Buffer
+	var buf strings.Builder
 	for i := range err.desc {
 		p := &err.desc[i]
 		if i > 0 {
@@ -131,7 +139,7 @@ func (check *Checker) sprintf(format string, args ...any) string {
 	return sprintf(fset, qf, false, format, args...)
 }
 
-func sprintf(fset *token.FileSet, qf Qualifier, debug bool, format string, args ...any) string {
+func sprintf(fset *token.FileSet, qf Qualifier, tpSubscripts bool, format string, args ...any) string {
 	for i, arg := range args {
 		switch a := arg.(type) {
 		case nil:
@@ -155,26 +163,34 @@ func sprintf(fset *token.FileSet, qf Qualifier, debug bool, format string, args 
 		case Object:
 			arg = ObjectString(a, qf)
 		case Type:
-			arg = typeString(a, qf, debug)
+			var buf bytes.Buffer
+			w := newTypeWriter(&buf, qf)
+			w.tpSubscripts = tpSubscripts
+			w.typ(a)
+			arg = buf.String()
 		case []Type:
 			var buf bytes.Buffer
+			w := newTypeWriter(&buf, qf)
+			w.tpSubscripts = tpSubscripts
 			buf.WriteByte('[')
 			for i, x := range a {
 				if i > 0 {
 					buf.WriteString(", ")
 				}
-				buf.WriteString(typeString(x, qf, debug))
+				w.typ(x)
 			}
 			buf.WriteByte(']')
 			arg = buf.String()
 		case []*TypeParam:
 			var buf bytes.Buffer
+			w := newTypeWriter(&buf, qf)
+			w.tpSubscripts = tpSubscripts
 			buf.WriteByte('[')
 			for i, x := range a {
 				if i > 0 {
 					buf.WriteString(", ")
 				}
-				buf.WriteString(typeString(x, qf, debug)) // use typeString so we get subscripts when debugging
+				w.typ(x)
 			}
 			buf.WriteByte(']')
 			arg = buf.String()
@@ -204,11 +220,29 @@ func (check *Checker) report(errp *error_) {
 		panic("empty error details")
 	}
 
+	msg := errp.msg(check.fset, check.qualifier)
+	switch errp.code {
+	case InvalidSyntaxTree:
+		msg = "invalid AST: " + msg
+	case 0:
+		panic("no error code provided")
+	}
+
+	// If we have an URL for error codes, add a link to the first line.
+	if errp.code != 0 && check.conf._ErrorURL != "" {
+		u := fmt.Sprintf(check.conf._ErrorURL, errp.code)
+		if i := strings.Index(msg, "\n"); i >= 0 {
+			msg = msg[:i] + u + msg[i:]
+		} else {
+			msg += u
+		}
+	}
+
 	span := spanOf(errp.desc[0].posn)
 	e := Error{
 		Fset:       check.fset,
 		Pos:        span.pos,
-		Msg:        errp.msg(check.fset, check.qualifier),
+		Msg:        msg,
 		Soft:       errp.soft,
 		go116code:  errp.code,
 		go116start: span.start,
@@ -242,7 +276,7 @@ func (check *Checker) report(errp *error_) {
 		check.firstErr = err
 	}
 
-	if trace {
+	if check.conf._Trace {
 		pos := e.Pos
 		msg := e.Msg
 		check.trace(pos, "ERROR: %s", msg)
@@ -255,38 +289,38 @@ func (check *Checker) report(errp *error_) {
 	f(err)
 }
 
+const (
+	invalidArg = "invalid argument: "
+	invalidOp  = "invalid operation: "
+)
+
 // newErrorf creates a new error_ for later reporting with check.report.
-func newErrorf(at positioner, code errorCode, format string, args ...any) *error_ {
+func newErrorf(at positioner, code Code, format string, args ...any) *error_ {
 	return &error_{
 		desc: []errorDesc{{at, format, args}},
 		code: code,
 	}
 }
 
-func (check *Checker) error(at positioner, code errorCode, msg string) {
-	check.report(newErrorf(at, code, msg))
+func (check *Checker) error(at positioner, code Code, msg string) {
+	check.report(newErrorf(at, code, "%s", msg))
 }
 
-func (check *Checker) errorf(at positioner, code errorCode, format string, args ...any) {
+func (check *Checker) errorf(at positioner, code Code, format string, args ...any) {
 	check.report(newErrorf(at, code, format, args...))
 }
 
-func (check *Checker) softErrorf(at positioner, code errorCode, format string, args ...any) {
+func (check *Checker) softErrorf(at positioner, code Code, format string, args ...any) {
 	err := newErrorf(at, code, format, args...)
 	err.soft = true
 	check.report(err)
 }
 
-func (check *Checker) invalidAST(at positioner, format string, args ...any) {
-	check.errorf(at, 0, "invalid AST: "+format, args...)
-}
-
-func (check *Checker) invalidArg(at positioner, code errorCode, format string, args ...any) {
-	check.errorf(at, code, "invalid argument: "+format, args...)
-}
-
-func (check *Checker) invalidOp(at positioner, code errorCode, format string, args ...any) {
-	check.errorf(at, code, "invalid operation: "+format, args...)
+func (check *Checker) versionErrorf(at positioner, v version, format string, args ...interface{}) {
+	msg := check.sprintf(format, args...)
+	var err *error_
+	err = newErrorf(at, UnsupportedFeature, "%s requires %s or later", msg, v)
+	check.report(err)
 }
 
 // The positioner interface is used to extract the position of type-checker
@@ -343,7 +377,7 @@ func spanOf(at positioner) posSpan {
 			pos := x.Pos()
 			return posSpan{pos, pos, x.expr.End()}
 		}
-		return posSpan{token.NoPos, token.NoPos, token.NoPos}
+		return posSpan{nopos, nopos, nopos}
 	default:
 		pos := at.Pos()
 		return posSpan{pos, pos, pos}
@@ -352,15 +386,15 @@ func spanOf(at positioner) posSpan {
 
 // stripAnnotations removes internal (type) annotations from s.
 func stripAnnotations(s string) string {
-	var b strings.Builder
+	var buf strings.Builder
 	for _, r := range s {
 		// strip #'s and subscript digits
 		if r < '₀' || '₀'+10 <= r { // '₀' == U+2080
-			b.WriteRune(r)
+			buf.WriteRune(r)
 		}
 	}
-	if b.Len() < len(s) {
-		return b.String()
+	if buf.Len() < len(s) {
+		return buf.String()
 	}
 	return s
 }

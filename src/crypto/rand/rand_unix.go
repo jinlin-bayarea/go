@@ -10,6 +10,7 @@
 package rand
 
 import (
+	"crypto/internal/boring"
 	"errors"
 	"io"
 	"os"
@@ -22,6 +23,10 @@ import (
 const urandomDevice = "/dev/urandom"
 
 func init() {
+	if boring.Enabled {
+		Reader = boring.RandReader
+		return
+	}
 	Reader = &reader{}
 }
 
@@ -29,55 +34,38 @@ func init() {
 type reader struct {
 	f    io.Reader
 	mu   sync.Mutex
-	used uint32 // Atomic: 0 - never used, 1 - used, but f == nil, 2 - used, and f != nil
+	used atomic.Uint32 // Atomic: 0 - never used, 1 - used, but f == nil, 2 - used, and f != nil
 }
 
 // altGetRandom if non-nil specifies an OS-specific function to get
 // urandom-style randomness.
-var altGetRandom func([]byte) (ok bool)
-
-// batched returns a function that calls f to populate a []byte by chunking it
-// into subslices of, at most, readMax bytes.
-func batched(f func([]byte) error, readMax int) func([]byte) bool {
-	return func(out []byte) bool {
-		for len(out) > 0 {
-			read := len(out)
-			if read > readMax {
-				read = readMax
-			}
-			if f(out[:read]) != nil {
-				return false
-			}
-			out = out[read:]
-		}
-		return true
-	}
-}
+var altGetRandom func([]byte) (err error)
 
 func warnBlocked() {
 	println("crypto/rand: blocked for 60 seconds waiting to read random data from the kernel")
 }
 
 func (r *reader) Read(b []byte) (n int, err error) {
-	if atomic.CompareAndSwapUint32(&r.used, 0, 1) {
+	boring.Unreachable()
+	if r.used.CompareAndSwap(0, 1) {
 		// First use of randomness. Start timer to warn about
 		// being blocked on entropy not being available.
 		t := time.AfterFunc(time.Minute, warnBlocked)
 		defer t.Stop()
 	}
-	if altGetRandom != nil && altGetRandom(b) {
+	if altGetRandom != nil && altGetRandom(b) == nil {
 		return len(b), nil
 	}
-	if atomic.LoadUint32(&r.used) != 2 {
+	if r.used.Load() != 2 {
 		r.mu.Lock()
-		if r.used != 2 {
+		if r.used.Load() != 2 {
 			f, err := os.Open(urandomDevice)
 			if err != nil {
 				r.mu.Unlock()
 				return 0, err
 			}
 			r.f = hideAgainReader{f}
-			atomic.StoreUint32(&r.used, 2)
+			r.used.Store(2)
 		}
 		r.mu.Unlock()
 	}

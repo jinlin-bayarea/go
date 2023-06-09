@@ -18,8 +18,19 @@ The GOGC variable sets the initial garbage collection target percentage.
 A collection is triggered when the ratio of freshly allocated data to live data
 remaining after the previous collection reaches this percentage. The default
 is GOGC=100. Setting GOGC=off disables the garbage collector entirely.
-The runtime/debug package's SetGCPercent function allows changing this
-percentage at run time. See https://golang.org/pkg/runtime/debug/#SetGCPercent.
+[runtime/debug.SetGCPercent] allows changing this percentage at run time.
+
+The GOMEMLIMIT variable sets a soft memory limit for the runtime. This memory limit
+includes the Go heap and all other memory managed by the runtime, and excludes
+external memory sources such as mappings of the binary itself, memory managed in
+other languages, and memory held by the operating system on behalf of the Go
+program. GOMEMLIMIT is a numeric value in bytes with an optional unit suffix.
+The supported suffixes include B, KiB, MiB, GiB, and TiB. These suffixes
+represent quantities of bytes as defined by the IEC 80000-13 standard. That is,
+they are based on powers of two: KiB means 2^10 bytes, MiB means 2^20 bytes,
+and so on. The default setting is math.MaxInt64, which effectively disables the
+memory limit. [runtime/debug.SetMemoryLimit] allows changing this limit at run
+time.
 
 The GODEBUG variable controls debugging variables within the runtime.
 It is a comma-separated list of name=val pairs setting these named variables:
@@ -31,12 +42,28 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	clobber the memory content of an object with bad content when it frees
 	the object.
 
+	cpu.*: cpu.all=off disables the use of all optional instruction set extensions.
+	cpu.extension=off disables use of instructions from the specified instruction set extension.
+	extension is the lower case name for the instruction set extension such as sse41 or avx
+	as listed in internal/cpu package. As an example cpu.avx=off disables runtime detection
+	and thereby use of AVX instructions.
+
 	cgocheck: setting cgocheck=0 disables all checks for packages
 	using cgo to incorrectly pass Go pointers to non-Go code.
 	Setting cgocheck=1 (the default) enables relatively cheap
-	checks that may miss some errors.  Setting cgocheck=2 enables
-	expensive checks that should not miss any errors, but will
-	cause your program to run slower.
+	checks that may miss some errors. A more complete, but slow,
+	cgocheck mode can be enabled using GOEXPERIMENT (which
+	requires a rebuild), see https://pkg.go.dev/internal/goexperiment for details.
+
+	dontfreezetheworld: by default, the start of a fatal panic or throw
+	"freezes the world", preempting all threads to stop all running
+	goroutines, which makes it possible to traceback all goroutines, and
+	keeps their state close to the point of panic. Setting
+	dontfreezetheworld=1 disables this preemption, allowing goroutines to
+	continue executing during panic processing. Note that goroutines that
+	naturally enter the scheduler will still stop. This can be useful when
+	debugging the runtime scheduler, as freezetheworld perturbs scheduler
+	state and thus may hide problems.
 
 	efence: setting efence=1 causes the allocator to run in a mode
 	where each object is allocated on a unique page and addresses are
@@ -62,7 +89,7 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	error at each collection, summarizing the amount of memory collected and the
 	length of the pause. The format of this line is subject to change.
 	Currently, it is:
-		gc # @#s #%: #+#+# ms clock, #+#/#/#+# ms cpu, #->#-># MB, # MB goal, # P
+		gc # @#s #%: #+#+# ms clock, #+#/#/#+# ms cpu, #->#-># MB, # MB goal, # MB stacks, #MB globals, # P
 	where the fields are as follows:
 		gc #         the GC number, incremented at each GC
 		@#s          time in seconds since program start
@@ -101,11 +128,21 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	madvdontneed: setting madvdontneed=0 will use MADV_FREE
 	instead of MADV_DONTNEED on Linux when returning memory to the
 	kernel. This is more efficient, but means RSS numbers will
-	drop only when the OS is under memory pressure.
+	drop only when the OS is under memory pressure. On the BSDs and
+	Illumos/Solaris, setting madvdontneed=1 will use MADV_DONTNEED instead
+	of MADV_FREE. This is less efficient, but causes RSS numbers to drop
+	more quickly.
 
 	memprofilerate: setting memprofilerate=X will update the value of runtime.MemProfileRate.
 	When set to 0 memory profiling is disabled.  Refer to the description of
 	MemProfileRate for the default value.
+
+	pagetrace: setting pagetrace=/path/to/file will write out a trace of page events
+	that can be viewed, analyzed, and visualized using the x/debug/cmd/pagetrace tool.
+	Build your program with GOEXPERIMENT=pagetrace to enable this functionality. Do not
+	enable this functionality if your program is a setuid binary as it introduces a security
+	risk in that scenario. Currently not supported on Windows, plan9 or js/wasm. Setting this
+	option for some applications can produce large traces, so use with care.
 
 	invalidptr: invalidptr=1 (the default) causes the garbage collector and stack
 	copier to crash the program if an invalid pointer value (for example, 1)
@@ -122,12 +159,13 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	scavenger as well as the total amount of memory returned to the operating system
 	and an estimate of physical memory utilization. The format of this line is subject
 	to change, but currently it is:
-		scav # # KiB work, # KiB total, #% util
+		scav # KiB work (bg), # KiB work (eager), # KiB total, #% util
 	where the fields are as follows:
-		scav #       the scavenge cycle number
-		# KiB work   the amount of memory returned to the OS since the last line
-		# KiB total  the total amount of memory returned to the OS
-		#% util      the fraction of all unscavenged memory which is in-use
+		# KiB work (bg)    the amount of memory returned to the OS in the background since
+		                   the last line
+		# KiB work (eager) the amount of memory returned to the OS eagerly since the last line
+		# KiB now          the amount of address space currently returned to the OS
+		#% util            the fraction of all unscavenged heap memory which is in-use
 	If the line ends with "(forced)", then scavenging was forced by a
 	debug.FreeOSMemory() call.
 
@@ -143,6 +181,11 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	report. This also extends the information returned by runtime.Stack. Ancestor's goroutine
 	IDs will refer to the ID of the goroutine at the time of creation; it's possible for this
 	ID to be reused for another goroutine. Setting N to 0 will report no ancestry information.
+
+	tracefpunwindoff: setting tracefpunwindoff=1 forces the execution tracer to
+	use the runtime's default stack unwinder instead of frame pointer unwinding.
+	This increases tracer overhead, but could be helpful as a workaround or for
+	debugging unexpected regressions caused by frame pointer unwinding.
 
 	asyncpreemptoff: asyncpreemptoff=1 disables signal-based
 	asynchronous goroutine preemption. This makes some loops
@@ -177,6 +220,7 @@ and shows goroutines created internally by the run-time.
 GOTRACEBACK=crash is like “system” but crashes in an operating system-specific
 manner instead of exiting. For example, on Unix systems, the crash raises
 SIGABRT to trigger a core dump.
+GOTRACEBACK=wer is like “crash” but doesn't disable Windows Error Reporting (WER).
 For historical reasons, the GOTRACEBACK settings 0, 1, and 2 are synonyms for
 none, all, and system, respectively.
 The runtime/debug package's SetTraceback function allows increasing the
@@ -190,6 +234,25 @@ the set of Go environment variables. They influence the building of Go programs
 GOARCH, GOOS, and GOROOT are recorded at compile time and made available by
 constants or functions in this package, but they do not influence the execution
 of the run-time system.
+
+# Security
+
+On Unix platforms, Go's runtime system behaves slightly differently when a
+binary is setuid/setgid or executed with setuid/setgid-like properties, in order
+to prevent dangerous behaviors. On Linux this is determined by checking for the
+AT_SECURE flag in the auxiliary vector, on the BSDs and Solaris/Illumos it is
+determined by checking the issetugid syscall, and on AIX it is determined by
+checking if the uid/gid match the effective uid/gid.
+
+When the runtime determines the binary is setuid/setgid-like, it does three main
+things:
+  - The standard input/output file descriptors (0, 1, 2) are checked to be open.
+    If any of them are closed, they are opened pointing at /dev/null.
+  - The value of the GOTRACEBACK environment variable is set to 'none'.
+  - When a signal is received that terminates the program, or the program
+    encounters an unrecoverable panic that would otherwise override the value
+    of GOTRACEBACK, the goroutine stack, registers, and other memory related
+    information are omitted.
 */
 package runtime
 

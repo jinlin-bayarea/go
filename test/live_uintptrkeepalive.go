@@ -1,6 +1,6 @@
 // errorcheck -0 -m -live -std
 
-// +build !windows,!js
+// +build !windows,!js,!wasip1
 
 // Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
@@ -12,7 +12,7 @@
 // bodies (assembly, linkname), as well as explicitly on complete functions
 // with //go:uintptrkeepalive.
 //
-// This is most important for syscall.Syscall (and similiar functions), so we
+// This is most important for syscall.Syscall (and similar functions), so we
 // test it explicitly.
 
 package p

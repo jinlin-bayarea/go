@@ -306,8 +306,8 @@ var domainAndTypeTests = [...]struct {
 	{"foo.sso.example.com", "sso.example.com", "sso.example.com", false, nil},
 	{"bar.co.uk", "bar.co.uk", "bar.co.uk", false, nil},
 	{"foo.bar.co.uk", ".bar.co.uk", "bar.co.uk", false, nil},
-	{"127.0.0.1", "127.0.0.1", "", false, errNoHostname},
-	{"2001:4860:0:2001::68", "2001:4860:0:2001::68", "2001:4860:0:2001::68", false, errNoHostname},
+	{"127.0.0.1", "127.0.0.1", "127.0.0.1", true, nil},
+	{"2001:4860:0:2001::68", "2001:4860:0:2001::68", "2001:4860:0:2001::68", true, nil},
 	{"www.example.com", ".", "", false, errMalformedDomain},
 	{"www.example.com", "..", "", false, errMalformedDomain},
 	{"www.example.com", "other.com", "", false, errIllegalDomain},
@@ -328,7 +328,7 @@ func TestDomainAndType(t *testing.T) {
 	for _, tc := range domainAndTypeTests {
 		domain, hostOnly, err := jar.domainAndType(tc.host, tc.domain)
 		if err != tc.wantErr {
-			t.Errorf("%q/%q: got %q error, want %q",
+			t.Errorf("%q/%q: got %q error, want %v",
 				tc.host, tc.domain, err, tc.wantErr)
 			continue
 		}
@@ -349,7 +349,7 @@ func expiresIn(delta int) string {
 	return "expires=" + t.Format(time.RFC1123)
 }
 
-// mustParseURL parses s to an URL and panics on error.
+// mustParseURL parses s to a URL and panics on error.
 func mustParseURL(s string) *url.URL {
 	u, err := url.Parse(s)
 	if err != nil || u.Scheme == "" || u.Host == "" {
@@ -594,6 +594,21 @@ var basicsTests = [...]jarTest{
 		[]query{{"http://192.168.0.10", "a=1"}},
 	},
 	{
+		"Domain cookies on IP.",
+		"http://192.168.0.10",
+		[]string{
+			"a=1; domain=192.168.0.10",  // allowed
+			"b=2; domain=172.31.9.9",    // rejected, can't set cookie for other IP
+			"c=3; domain=.192.168.0.10", // rejected like in most browsers
+		},
+		"a=1",
+		[]query{
+			{"http://192.168.0.10", "a=1"},
+			{"http://172.31.9.9", ""},
+			{"http://www.fancy.192.168.0.10", ""},
+		},
+	},
+	{
 		"Port is ignored #1.",
 		"http://www.host.test/",
 		[]string{"a=1"},
@@ -655,7 +670,7 @@ var updateAndDeleteTests = [...]jarTest{
 		},
 	},
 	{
-		"Clear Secure flag from a http.",
+		"Clear Secure flag from an http.",
 		"http://www.host.test/",
 		[]string{
 			"b=xx",
@@ -927,9 +942,16 @@ var chromiumBasicsTests = [...]jarTest{
 	{
 		"TestIpAddress #3.",
 		"http://1.2.3.4/foo",
-		[]string{"a=1; domain=1.2.3.4"},
+		[]string{"a=1; domain=1.2.3.3"},
 		"",
 		[]query{{"http://1.2.3.4/foo", ""}},
+	},
+	{
+		"TestIpAddress #4.",
+		"http://1.2.3.4/foo",
+		[]string{"a=1; domain=1.2.3.4"},
+		"a=1",
+		[]query{{"http://1.2.3.4/foo", "a=1"}},
 	},
 	{
 		"TestNonDottedAndTLD #2.",

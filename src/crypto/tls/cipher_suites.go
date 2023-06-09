@@ -10,6 +10,7 @@ import (
 	"crypto/cipher"
 	"crypto/des"
 	"crypto/hmac"
+	"crypto/internal/boring"
 	"crypto/rc4"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -376,14 +377,6 @@ var aesgcmCiphers = map[uint16]bool{
 	TLS_AES_256_GCM_SHA384: true,
 }
 
-var nonAESGCMAEADCiphers = map[uint16]bool{
-	// TLS 1.2
-	TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305:   true,
-	TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305: true,
-	// TLS 1.3
-	TLS_CHACHA20_POLY1305_SHA256: true,
-}
-
 // aesgcmPreferred returns whether the first known cipher in the preference list
 // is an AES-GCM cipher, implying the peer has hardware support for it.
 func aesgcmPreferred(ciphers []uint16) bool {
@@ -421,7 +414,13 @@ func cipherAES(key, iv []byte, isRead bool) any {
 
 // macSHA1 returns a SHA-1 based constant time MAC.
 func macSHA1(key []byte) hash.Hash {
-	return hmac.New(newConstantTimeHash(sha1.New), key)
+	h := sha1.New
+	// The BoringCrypto SHA1 does not have a constant-time
+	// checksum function, so don't try to use it.
+	if !boring.Enabled {
+		h = newConstantTimeHash(h)
+	}
+	return hmac.New(h, key)
 }
 
 // macSHA256 returns a SHA-256 based MAC. This is only supported in TLS 1.2 and
@@ -466,7 +465,7 @@ func (f *prefixNonceAEAD) Open(out, nonce, ciphertext, additionalData []byte) ([
 	return f.aead.Open(out, f.nonce[:], ciphertext, additionalData)
 }
 
-// xoredNonceAEAD wraps an AEAD by XORing in a fixed pattern to the nonce
+// xorNonceAEAD wraps an AEAD by XORing in a fixed pattern to the nonce
 // before each call.
 type xorNonceAEAD struct {
 	nonceMask [aeadNonceLength]byte
@@ -509,7 +508,13 @@ func aeadAESGCM(key, noncePrefix []byte) aead {
 	if err != nil {
 		panic(err)
 	}
-	aead, err := cipher.NewGCM(aes)
+	var aead cipher.AEAD
+	if boring.Enabled {
+		aead, err = boring.NewGCMTLS(aes)
+	} else {
+		boring.Unreachable()
+		aead, err = cipher.NewGCM(aes)
+	}
 	if err != nil {
 		panic(err)
 	}
@@ -569,6 +574,7 @@ func (c *cthWrapper) Write(p []byte) (int, error) { return c.h.Write(p) }
 func (c *cthWrapper) Sum(b []byte) []byte         { return c.h.ConstantTimeSum(b) }
 
 func newConstantTimeHash(h func() hash.Hash) func() hash.Hash {
+	boring.Unreachable()
 	return func() hash.Hash {
 		return &cthWrapper{h().(constantTimeHash)}
 	}

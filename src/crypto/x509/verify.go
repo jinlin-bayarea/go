@@ -591,41 +591,19 @@ func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *V
 	}
 	comparisonCount := 0
 
-	var leaf *Certificate
 	if certType == intermediateCertificate || certType == rootCertificate {
 		if len(currentChain) == 0 {
 			return errors.New("x509: internal error: empty chain when appending CA cert")
-		}
-		leaf = currentChain[0]
-	}
-
-	if (len(c.ExtKeyUsage) > 0 || len(c.UnknownExtKeyUsage) > 0) && len(opts.KeyUsages) > 0 {
-		acceptableUsage := false
-		um := make(map[ExtKeyUsage]bool, len(opts.KeyUsages))
-		for _, u := range opts.KeyUsages {
-			um[u] = true
-		}
-		if !um[ExtKeyUsageAny] {
-			for _, u := range c.ExtKeyUsage {
-				if u == ExtKeyUsageAny || um[u] {
-					acceptableUsage = true
-					break
-				}
-			}
-			if !acceptableUsage {
-				return CertificateInvalidError{c, IncompatibleUsage, ""}
-			}
 		}
 	}
 
 	if (certType == intermediateCertificate || certType == rootCertificate) &&
 		c.hasNameConstraints() {
 		toCheck := []*Certificate{}
-		if leaf.hasSANExtension() {
-			toCheck = append(toCheck, leaf)
-		}
-		if c.hasSANExtension() {
-			toCheck = append(toCheck, c)
+		for _, c := range currentChain {
+			if c.hasSANExtension() {
+				toCheck = append(toCheck, c)
+			}
 		}
 		for _, sanCert := range toCheck {
 			err := forEachSAN(sanCert.getSANExtension(), func(tag int, data []byte) error {
@@ -725,6 +703,13 @@ func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *V
 		}
 	}
 
+	if !boringAllowCert(c) {
+		// IncompatibleUsage is not quite right here,
+		// but it's also the "no chains found" error
+		// and is close enough.
+		return CertificateInvalidError{c, IncompatibleUsage, ""}
+	}
+
 	return nil
 }
 
@@ -757,6 +742,8 @@ func (c *Certificate) isValid(certType int, currentChain []*Certificate, opts *V
 // Certificates that use SHA1WithRSA and ECDSAWithSHA1 signatures are not supported,
 // and will not be used to build chains.
 //
+// Certificates other than c in the returned chains should not be modified.
+//
 // WARNING: this function doesn't do any revocation checking.
 func (c *Certificate) Verify(opts VerifyOptions) (chains [][]*Certificate, err error) {
 	// Platform-specific verification needs the ASN.1 contents so
@@ -776,7 +763,10 @@ func (c *Certificate) Verify(opts VerifyOptions) (chains [][]*Certificate, err e
 
 	// Use platform verifiers, where available, if Roots is from SystemCertPool.
 	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" || runtime.GOOS == "ios" {
-		if opts.Roots == nil {
+		// Don't use the system verifier if the system pool was replaced with a non-system pool,
+		// i.e. if SetFallbackRoots was called with x509usefallbackroots=1.
+		systemPool := systemRootsPool()
+		if opts.Roots == nil && (systemPool == nil || systemPool.systemPool) {
 			return c.systemVerify(&opts)
 		}
 		if opts.Roots != nil && opts.Roots.systemPool {
@@ -797,10 +787,6 @@ func (c *Certificate) Verify(opts VerifyOptions) (chains [][]*Certificate, err e
 		}
 	}
 
-	if len(opts.KeyUsages) == 0 {
-		opts.KeyUsages = []ExtKeyUsage{ExtKeyUsageServerAuth}
-	}
-
 	err = c.isValid(leafCertificate, nil, &opts)
 	if err != nil {
 		return
@@ -813,10 +799,40 @@ func (c *Certificate) Verify(opts VerifyOptions) (chains [][]*Certificate, err e
 		}
 	}
 
+	var candidateChains [][]*Certificate
 	if opts.Roots.contains(c) {
-		return [][]*Certificate{{c}}, nil
+		candidateChains = [][]*Certificate{{c}}
+	} else {
+		candidateChains, err = c.buildChains([]*Certificate{c}, nil, &opts)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return c.buildChains([]*Certificate{c}, nil, &opts)
+
+	if len(opts.KeyUsages) == 0 {
+		opts.KeyUsages = []ExtKeyUsage{ExtKeyUsageServerAuth}
+	}
+
+	for _, eku := range opts.KeyUsages {
+		if eku == ExtKeyUsageAny {
+			// If any key usage is acceptable, no need to check the chain for
+			// key usages.
+			return candidateChains, nil
+		}
+	}
+
+	chains = make([][]*Certificate, 0, len(candidateChains))
+	for _, candidate := range candidateChains {
+		if checkChainForKeyUsage(candidate, opts.KeyUsages) {
+			chains = append(chains, candidate)
+		}
+	}
+
+	if len(chains) == 0 {
+		return nil, CertificateInvalidError{c, IncompatibleUsage, ""}
+	}
+
+	return chains, nil
 }
 
 func appendToFreshChain(chain []*Certificate, cert *Certificate) []*Certificate {
@@ -906,6 +922,10 @@ func (c *Certificate) buildChains(currentChain []*Certificate, sigChecks *int, o
 
 		err = candidate.isValid(certType, currentChain, opts)
 		if err != nil {
+			if hintErr == nil {
+				hintErr = err
+				hintCert = candidate
+			}
 			return
 		}
 
@@ -1058,7 +1078,7 @@ func toLowerCaseASCII(in string) string {
 // IP addresses can be optionally enclosed in square brackets and are checked
 // against the IPAddresses field. Other names are checked case insensitively
 // against the DNSNames field. If the names are valid hostnames, the certificate
-// fields can have a wildcard as the left-most label.
+// fields can have a wildcard as the complete left-most label (e.g. *.example.com).
 //
 // Note that the legacy Common Name field is ignored.
 func (c *Certificate) VerifyHostname(h string) error {

@@ -54,7 +54,6 @@ func NewServer(ops ServerOps) *Server {
 //	for _, path := range sumdb.ServerPaths {
 //		http.Handle(path, srv)
 //	}
-//
 var ServerPaths = []string{
 	"/lookup/",
 	"/latest",
@@ -149,6 +148,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				msg, err := tlog.FormatRecord(start+int64(i), text)
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
 				}
 				data = append(data, msg...)
 			}

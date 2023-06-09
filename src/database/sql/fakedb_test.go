@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -89,6 +90,8 @@ func (cc *fakeDriverCtx) OpenConnector(name string) (driver.Connector, error) {
 
 type fakeDB struct {
 	name string
+
+	useRawBytes atomic.Bool
 
 	mu       sync.Mutex
 	tables   map[string]*table
@@ -643,7 +646,7 @@ func (c *fakeConn) PrepareContext(ctx context.Context, query string) (driver.Stm
 	}
 
 	if c.stickyBad || (hookPrepareBadConn != nil && hookPrepareBadConn()) {
-		return nil, fakeError{Message: "Preapre: Sticky Bad", Wrapped: driver.ErrBadConn}
+		return nil, fakeError{Message: "Prepare: Sticky Bad", Wrapped: driver.ErrBadConn}
 	}
 
 	c.touchMem()
@@ -697,6 +700,8 @@ func (c *fakeConn) PrepareContext(ctx context.Context, query string) (driver.Stm
 		switch cmd {
 		case "WIPE":
 			// Nothing
+		case "USE_RAWBYTES":
+			c.db.useRawBytes.Store(true)
 		case "SELECT":
 			stmt, err = c.prepareSelect(stmt, parts)
 		case "CREATE":
@@ -799,6 +804,9 @@ func (s *fakeStmt) ExecContext(ctx context.Context, args []driver.NamedValue) (d
 	switch s.cmd {
 	case "WIPE":
 		db.wipe()
+		return driver.ResultNoRows, nil
+	case "USE_RAWBYTES":
+		s.c.db.useRawBytes.Store(true)
 		return driver.ResultNoRows, nil
 	case "CREATE":
 		if err := db.createTable(s.table, s.colName, s.colType); err != nil {
@@ -929,6 +937,7 @@ func (s *fakeStmt) QueryContext(ctx context.Context, args []driver.NamedValue) (
 				txStatus = "transaction"
 			}
 			cursor := &rowsCursor{
+				db:        s.c.db,
 				parentMem: s.c,
 				posRow:    -1,
 				rows: [][]*row{
@@ -1025,6 +1034,7 @@ func (s *fakeStmt) QueryContext(ctx context.Context, args []driver.NamedValue) (
 	}
 
 	cursor := &rowsCursor{
+		db:        s.c.db,
 		parentMem: s.c,
 		posRow:    -1,
 		rows:      setMRows,
@@ -1067,6 +1077,7 @@ func (tx *fakeTx) Rollback() error {
 }
 
 type rowsCursor struct {
+	db        *fakeDB
 	parentMem memToucher
 	cols      [][]string
 	colType   [][]string
@@ -1089,6 +1100,9 @@ type rowsCursor struct {
 	// This is separate from the fakeConn.line to allow for drivers that
 	// can start multiple queries on the same transaction at the same time.
 	line int64
+
+	// closeErr is returned when rowsCursor.Close
+	closeErr error
 }
 
 func (rc *rowsCursor) touchMem() {
@@ -1100,7 +1114,7 @@ func (rc *rowsCursor) Close() error {
 	rc.touchMem()
 	rc.parentMem.touchMem()
 	rc.closed = true
-	return nil
+	return rc.closeErr
 }
 
 func (rc *rowsCursor) Columns() []string {
@@ -1138,7 +1152,7 @@ func (rc *rowsCursor) Next(dest []driver.Value) error {
 		// messing up conversions or doing them differently.
 		dest[i] = v
 
-		if bs, ok := v.([]byte); ok {
+		if bs, ok := v.([]byte); ok && !rc.db.useRawBytes.Load() {
 			if rc.bytesClone == nil {
 				rc.bytesClone = make(map[*byte][]byte)
 			}
